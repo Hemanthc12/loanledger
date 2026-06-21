@@ -1,0 +1,13 @@
+const config = {
+  appId: 'com.family.loanledger',
+  appName: 'LoanLedger',
+  webDir: 'www',
+  server: {
+    androidScheme: 'https'
+  },
+  android: {
+    allowMixedContent: false
+  }
+};
+
+module.exports = config;
