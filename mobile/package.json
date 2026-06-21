@@ -1,0 +1,17 @@
+{
+  "name": "loanledger-mobile",
+  "version": "1.0.0",
+  "description": "LoanLedger EMI Calculator — Android wrapper (Capacitor)",
+  "scripts": {
+    "sync": "npx cap sync android",
+    "open:android": "npx cap open android",
+    "build:apk": "cd android && ./gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}
