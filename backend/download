@@ -10,7 +10,7 @@ Config (environment variables / defaults in init_from_env)
   GOOGLE_SHEETS_CREDS   path to service-account JSON key file
   GOOGLE_SHEET_ID       spreadsheet ID from the URL
 """
-
+ 
 import logging
 import os
 import time
