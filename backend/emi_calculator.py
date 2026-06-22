@@ -1,576 +1,308 @@
 """
-app.py — LoanLedger Flask backend
-SQLite is the local working DB; Google Sheets is the cloud store.
-On startup: pull Sheets → SQLite (background).
-After writes: push SQLite → Sheets (background, non-blocking).
-Run: python app.py
+emi_calculator.py — Pure EMI business logic
+No I/O. All calculations use reducing balance method.
+
+Key concept — Pre-EMI / Broken Period Interest:
+  When sanction_date != start_date (first EMI date), the bank charges
+  simple daily interest for the gap days before the regular EMI cycle starts.
+
+  Formula:
+    days = (start_date - sanction_date).days
+    pre_emi_interest = principal * (annual_rate / 100) * days / 365
+
+  This appears as EMI #0 in the schedule — paid once, then regular EMIs begin.
 """
 
-import io
-import logging
-import os
-import uuid
-from datetime import datetime
-
-from flask import Flask, jsonify, request, send_file
-from flask_cors import CORS
-
-import database as db
-import emi_calculator as calc
-import sheets_sync
-from pdf_report import generate_pdf
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-# ── Simple shared-passphrase auth ───────────────────────────────────────
-# This app has no per-user accounts — it's meant for a small family group
-# sharing one passphrase. Set APP_PASSPHRASE in the environment to enable.
-# If APP_PASSPHRASE is unset, auth is disabled (useful for local dev only —
-# never deploy publicly without setting this).
-APP_PASSPHRASE = os.environ.get("APP_PASSPHRASE", "")
-
-app = Flask(__name__, static_folder="../frontend", static_url_path="")
-
-# CORS: restrict to known origins in production via ALLOWED_ORIGINS env var
-# (comma-separated). Defaults to "*" for easy local development.
-_allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*")
-if _allowed_origins == "*":
-    CORS(app)
-else:
-    CORS(app, origins=[o.strip() for o in _allowed_origins.split(",") if o.strip()])
-
-db.init_db()
-
-# Connect to Google Sheets and kick off background pull
-sheets_sync.init_from_env()
-sheets_sync.pull_bg()
-
-
-# ── Auth gate ─────────────────────────────────────────────────────────
-# Every /api/* request (except /api/health and /api/auth/check) must send
-# header  X-App-Passphrase: <the family passphrase>
-# The frontend asks for this once and stores it in localStorage.
-
-_EXEMPT_PATHS = {"/api/health", "/api/auth/check"}
-
-
-@app.before_request
-def _check_passphrase():
-    if not APP_PASSPHRASE:
-        return  # auth disabled (local dev)
-    if not request.path.startswith("/api/"):
-        return  # static frontend files are not sensitive
-    if request.path in _EXEMPT_PATHS:
-        return
-    supplied = request.headers.get("X-App-Passphrase", "")
-    if supplied != APP_PASSPHRASE:
-        return err("Unauthorized — incorrect or missing passphrase", 401)
-
-
-@app.route("/api/auth/check", methods=["POST"])
-def auth_check():
-    if not APP_PASSPHRASE:
-        return ok({"auth_enabled": False})
-    body = request.get_json(force=True) or {}
-    if body.get("passphrase") == APP_PASSPHRASE:
-        return ok({"auth_enabled": True, "valid": True})
-    return err("Incorrect passphrase", 401)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────
-
-def ok(data, code=200):  return jsonify({"success": True,  "data": data}), code
-def err(msg, code=400):  return jsonify({"success": False, "error": msg}), code
-def now_str():           return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def require(body, *fields):
-    missing = [f for f in fields if not body.get(f) and body.get(f) != 0]
-    if missing:
-        raise ValueError(f"Missing: {', '.join(missing)}")
-
-
-# ── Frontend ──────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    resp = app.make_response(app.send_static_file("index.html"))
-    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
-
-
-# ── Health ────────────────────────────────────────────────────────────
-
-@app.route("/api/health")
-def health():
-    return ok({"status": "ok", "db": db.DB_PATH})
-
-
-# ── Sync endpoints ────────────────────────────────────────────────────
-
-@app.route("/api/sync/status")
-def sync_status():
-    return ok(sheets_sync.get_status())
-
-
-@app.route("/api/sync/pull", methods=["POST"])
-def sync_pull():
-    try:
-        msg = sheets_sync.pull_all()
-        return ok({"message": msg})
-    except Exception as e:
-        return err(str(e))
-
-
-@app.route("/api/sync/push", methods=["POST"])
-def sync_push():
-    try:
-        msg = sheets_sync.push_all()
-        return ok({"message": msg})
-    except Exception as e:
-        return err(str(e))
-
-
-# ── EMI Calculator (stateless) ────────────────────────────────────────
-
-@app.route("/api/calculate-emi", methods=["POST"])
-def calculate_emi_api():
-    body = request.get_json(force=True)
-    try:
-        require(body, "principal", "interest_rate", "tenure_months")
-        P    = float(body["principal"])
-        rate = float(body["interest_rate"])
-        n    = int(body["tenure_months"])
-        sd   = str(body.get("sanction_date", ""))
-        ed   = str(body.get("start_date", ""))
-
-        emi      = calc.calculate_emi(P, rate, n)
-        total    = round(emi * n, 2)
-        interest = round(total - P, 2)
-
-        pre_int, days = (0.0, 0)
-        if sd and ed and sd != ed:
-            pre_int, days = calc.calculate_pre_emi(P, rate, sd, ed)
-
-        return ok({
-            "emi": emi, "total_payment": total, "total_interest": interest,
-            "pre_emi_interest": pre_int, "pre_emi_days": days,
-        })
-    except (ValueError, TypeError) as e:
-        return err(str(e))
-
-
-# ── Loans ─────────────────────────────────────────────────────────────
-
-@app.route("/api/loans", methods=["GET"])
-def list_loans():
-    return ok(db.list_loans())
-
-
-@app.route("/api/loans", methods=["POST"])
-def create_loan():
-    body = request.get_json(force=True)
-    try:
-        require(body, "user_name", "loan_amount", "interest_rate",
-                "tenure_months", "sanction_date", "start_date")
-
-        P             = float(body["loan_amount"])
-        rate          = float(body["interest_rate"])
-        months        = int(body["tenure_months"])
-        sanction_date = str(body["sanction_date"])
-        start_date    = str(body["start_date"])
-
-        if start_date < sanction_date:
-            return err("First EMI date cannot be before sanction date")
-
-        emi = calc.calculate_emi(P, rate, months)
-        pre_int, pre_days = calc.calculate_pre_emi(P, rate, sanction_date, start_date)
-
-        loan_id = "L" + uuid.uuid4().hex[:8].upper()
-        now = now_str()
-
-        loan_row = {
-            "loan_id": loan_id, "user_name": str(body["user_name"]),
-            "loan_amount": P, "interest_rate": rate,
-            "tenure_months": months, "sanction_date": sanction_date,
-            "start_date": start_date, "emi_amount": emi,
-            "pre_emi_interest": pre_int, "pre_emi_days": pre_days,
-            "status": "Active", "created_at": now, "updated_at": now,
-        }
-        db.insert_loan(loan_row)
-
-        schedule = calc.generate_schedule(
-            loan_id, P, rate, months, start_date,
-            sanction_date=sanction_date,
-        )
-        db.insert_schedule_rows(schedule)
-
-        regular_count = len([r for r in schedule if not r["is_pre_emi"]])
-        logger.info(f"Created {loan_id} for {body['user_name']}, EMI={emi}, pre_emi={pre_int} ({pre_days} days)")
-        sheets_sync.push_async()
-        return ok({
-            "loan_id": loan_id, "emi_amount": emi,
-            "total_emis": regular_count,
-            "pre_emi_interest": pre_int, "pre_emi_days": pre_days,
-            "message": f"Loan created. {'Pre-EMI interest ₹'+str(pre_int)+' for '+str(pre_days)+' days added as EMI #0.' if pre_int else 'No stub period.'}"
-        }, 201)
-    except (ValueError, TypeError) as e:
-        return err(str(e))
-
-
-@app.route("/api/loans/<loan_id>", methods=["GET"])
-def get_loan(loan_id):
-    loan = db.get_loan(loan_id)
-    if not loan: return err(f"Loan {loan_id} not found", 404)
-    return ok(loan)
-
-
-# ── Schedule ──────────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/schedule", methods=["GET"])
-def get_schedule(loan_id):
-    if not db.get_loan(loan_id): return err(f"Loan {loan_id} not found", 404)
-    return ok(db.get_schedule(loan_id))
-
-
-# ── Summary ───────────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/summary", methods=["GET"])
-def get_summary(loan_id):
-    loan = db.get_loan(loan_id)
-    if not loan: return err(f"Loan {loan_id} not found", 404)
-    return ok(calc.compute_summary(loan, db.get_schedule(loan_id), db.get_payments(loan_id)))
-
-
-# ── Payments ──────────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/payments", methods=["GET"])
-def get_payments(loan_id):
-    return ok(db.get_payments(loan_id))
-
-
-@app.route("/api/loans/<loan_id>/payments", methods=["POST"])
-def add_payment(loan_id):
-    body = request.get_json(force=True)
-    try:
-        require(body, "amount_paid", "payment_date")
-        loan = db.get_loan(loan_id)
-        if not loan:         return err(f"Loan {loan_id} not found", 404)
-        if loan["status"] == "Closed": return err("Loan is already closed")
-
-        schedule = db.get_schedule(loan_id)
-        # Include pre-EMI row in unpaid candidates
-        unpaid = [r for r in schedule if r["status"] in ("Unpaid", "Partial")]
-        if not unpaid: return err("No outstanding EMIs")
-
-        emi_number = int(body["emi_number"]) if body.get("emi_number") is not None else unpaid[0]["emi_number"]
-        target = next((r for r in unpaid if r["emi_number"] == emi_number), None)
-        if not target: return err(f"EMI #{emi_number} not found or already paid")
-
-        amount      = float(body["amount_paid"])
-        pay_date    = str(body["payment_date"])
-        new_status  = "Paid" if amount >= float(target["emi_amount"]) else "Partial"
-
-        db.update_emi_status(loan_id, emi_number, new_status, pay_date)
-
-        remaining = float(target["outstanding_balance"])
-
-        payment_id = "PAY" + uuid.uuid4().hex[:8].upper()
-        db.insert_payment({
-            "loan_id": loan_id, "payment_id": payment_id,
-            "payment_date": pay_date, "amount_paid": amount,
-            "payment_type": str(body.get("payment_type", "EMI")),
-            "emi_number": emi_number,
-            "remaining_balance_after_payment": round(remaining, 2),
-            "notes": str(body.get("notes", "")),
-            "created_at": now_str(),
+import math
+from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
+
+
+def _r2(v: float) -> float:
+    return float(Decimal(str(v)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+# ── Core EMI formula ──────────────────────────────────────────────────
+
+def calculate_emi(principal: float, annual_rate: float, months: int) -> float:
+    """EMI = P * r * (1+r)^n / ((1+r)^n - 1)"""
+    if annual_rate == 0:
+        return _r2(principal / months)
+    r = annual_rate / 12 / 100
+    emi = principal * r * math.pow(1 + r, months) / (math.pow(1 + r, months) - 1)
+    return _r2(emi)
+
+
+# ── Pre-EMI (Broken Period) Interest ─────────────────────────────────
+
+def calculate_pre_emi(principal: float, annual_rate: float,
+                      sanction_date: str, start_date: str) -> tuple[float, int]:
+    """
+    Calculate interest for the stub period between sanction and first EMI.
+
+    Returns (pre_emi_interest, days).
+    Returns (0.0, 0) when both dates are the same.
+
+    Uses simple interest on a 365-day year basis (actual/365),
+    which is the standard Indian bank convention.
+    """
+    sd = datetime.strptime(sanction_date, "%Y-%m-%d").date()
+    ed = datetime.strptime(start_date,    "%Y-%m-%d").date()
+
+    if ed <= sd:
+        return 0.0, 0
+
+    days = (ed - sd).days
+    # Simple interest: P * R * D / 365
+    interest = _r2(principal * (annual_rate / 100) * days / 365)
+    return interest, days
+
+
+# ── Full amortization schedule ────────────────────────────────────────
+
+def generate_schedule(
+    loan_id: str,
+    principal: float,
+    annual_rate: float,
+    tenure_months: int,
+    start_date: str,
+    sanction_date: str | None = None,
+    emi_amount: float | None = None,
+    start_emi_number: int = 1,
+    outstanding_balance: float | None = None,
+) -> list[dict]:
+    """
+    Generate full amortization schedule.
+
+    If sanction_date is provided (and differs from start_date),
+    EMI #0 = pre-EMI stub interest row is prepended.
+    Regular EMIs are numbered 1..n.
+    """
+    if emi_amount is None:
+        emi_amount = calculate_emi(principal, annual_rate, tenure_months)
+
+    balance = outstanding_balance if outstanding_balance is not None else principal
+    r = annual_rate / 12 / 100
+    due_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    rows = []
+
+    # ── EMI #0: Pre-EMI stub interest ──
+    if sanction_date and sanction_date != start_date:
+        pre_int, days = calculate_pre_emi(principal, annual_rate, sanction_date, start_date)
+        if pre_int > 0:
+            rows.append({
+                "loan_id": loan_id,
+                "emi_number": 0,
+                "due_date": start_date,       # payable on first EMI date
+                "emi_amount": pre_int,
+                "interest_component": pre_int,
+                "principal_component": 0.0,
+                "outstanding_balance": balance,
+                "status": "Unpaid",
+                "paid_date": "",
+                "is_pre_emi": 1,
+            })
+            due_date = due_date + relativedelta(months=1)  # ← advance so EMI #1 starts next month
+
+    # ── Regular EMIs #1..n ──
+    for i in range(tenure_months):
+        emi_num = start_emi_number + i
+        interest = _r2(balance * r)
+        principal_comp = _r2(emi_amount - interest)
+
+        if i == tenure_months - 1:          # last EMI: clear any residual
+            principal_comp = _r2(balance)
+            emi_amount = _r2(interest + principal_comp)
+
+        if principal_comp > balance:        # guard against float overflow
+            principal_comp = _r2(balance)
+            emi_amount = _r2(interest + principal_comp)
+
+        balance = _r2(max(0.0, balance - principal_comp))
+
+        rows.append({
+            "loan_id": loan_id,
+            "emi_number": emi_num,
+            "due_date": due_date.strftime("%Y-%m-%d"),
+            "emi_amount": emi_amount,
+            "interest_component": interest,
+            "principal_component": principal_comp,
+            "outstanding_balance": balance,
+            "status": "Unpaid",
+            "paid_date": "",
+            "is_pre_emi": 0,
         })
 
-        # Close loan if fully paid
-        updated = db.get_schedule(loan_id)
-        if not any(r["status"] in ("Unpaid","Partial") for r in updated):
-            db.update_loan(loan_id, {"status": "Closed", "updated_at": now_str()})
+        due_date = due_date + relativedelta(months=1)
+        if balance == 0:
+            break
 
-        label = "Pre-EMI interest" if target.get("is_pre_emi") else f"EMI #{emi_number}"
-        sheets_sync.push_async()
-        return ok({"payment_id": payment_id, "emi_number": emi_number,
-                   "status": new_status, "remaining_balance": remaining,
-                   "message": f"{label} marked {new_status}"}, 201)
-    except (ValueError, TypeError) as e:
-        return err(str(e))
+    return rows
 
 
-# ── Part Payment Savings ────────────────────────────────────────────────
+# ── Post-event recalculations ─────────────────────────────────────────
 
-@app.route("/api/loans/<loan_id>/part-payment-savings", methods=["GET"])
-def part_payment_savings(loan_id):
-    """
-    For every recorded Part Payment on this loan, compute the interest
-    saved per month going forward (what-if comparison: schedule without
-    that part payment vs. the schedule that actually resulted), plus a
-    combined month-by-month total across all part payments.
+def recalculate_after_part_payment(
+    loan_id: str,
+    outstanding_balance: float,
+    annual_rate: float,
+    remaining_months: int,
+    next_due_date: str,
+    reduce_emi: bool = False,
+    current_emi: float | None = None,
+    start_emi_number: int = 1,
+) -> tuple[float, list[dict]]:
+    """After part payment: reduce tenure (default) or reduce EMI."""
+    r = annual_rate / 12 / 100
 
-    Reads only from already-stored data (payments + emi_schedule history);
-    does not modify anything.
-    """
-    loan = db.get_loan(loan_id)
-    if not loan:
-        return err(f"Loan {loan_id} not found", 404)
+    if not reduce_emi and current_emi and r > 0:
+        if current_emi > outstanding_balance * r:
+            n = math.ceil(
+                -math.log(1 - (outstanding_balance * r) / current_emi) / math.log(1 + r)
+            )
+            remaining_months = max(1, n)
+            # use existing EMI amount (tenure shortens)
+            schedule = generate_schedule(
+                loan_id=loan_id, principal=outstanding_balance,
+                annual_rate=annual_rate, tenure_months=remaining_months,
+                start_date=next_due_date, outstanding_balance=outstanding_balance,
+                emi_amount=current_emi, start_emi_number=start_emi_number,
+            )
+            return current_emi, schedule
 
-    all_payments = db.get_payments(loan_id)
-    part_payments = [p for p in all_payments if p["payment_type"] == "Part Payment"]
-    if not part_payments:
-        return ok({"loan_id": loan_id, "part_payments": [], "combined_monthly_savings": [],
-                   "combined_total_saved": 0.0,
-                   "message": "No part payments recorded for this loan."})
-
-    schedule = db.get_schedule(loan_id)
-    regular = sorted(
-        [r for r in schedule if not r.get("is_pre_emi")],
-        key=lambda r: r["emi_number"]
+    schedule = generate_schedule(
+        loan_id=loan_id, principal=outstanding_balance,
+        annual_rate=annual_rate, tenure_months=remaining_months,
+        start_date=next_due_date, outstanding_balance=outstanding_balance,
+        start_emi_number=start_emi_number,
     )
-    annual_rate = float(loan["interest_rate"])
+    new_emi = schedule[0]["emi_amount"] if schedule else 0.0
+    return new_emi, schedule
 
-    results = []
-    combined = {}  # month -> accumulated saved
-    combined_total = 0.0
 
-    for pp in part_payments:
-        pay_date = pp["payment_date"]
-        amount_paid = float(pp["amount_paid"])
-        balance_after = float(pp["remaining_balance_after_payment"])
-        balance_before = round(balance_after + amount_paid, 2)
+def recalculate_after_rate_change(
+    loan_id: str,
+    outstanding_balance: float,
+    new_annual_rate: float,
+    remaining_months: int,
+    next_due_date: str,
+    start_emi_number: int = 1,
+) -> tuple[float, list[dict]]:
+    """Recalculate from next EMI with a new rate."""
+    schedule = generate_schedule(
+        loan_id=loan_id, principal=outstanding_balance,
+        annual_rate=new_annual_rate, tenure_months=remaining_months,
+        start_date=next_due_date, outstanding_balance=outstanding_balance,
+        start_emi_number=start_emi_number,
+    )
+    new_emi = schedule[0]["emi_amount"] if schedule else 0.0
+    return new_emi, schedule
 
-        # Schedule rows strictly after this payment reflect the post-payment
-        # trajectory (this is all we can reliably read back, since the old
-        # pre-payment rows for this window were overwritten at apply-time).
-        after_rows = [r for r in regular if r["due_date"] > pay_date]
-        if not after_rows:
-            continue
-        first_after = after_rows[0]
-        emi_after = float(first_after["emi_amount"])
 
-        # "Before" EMI amount: the EMI that was active immediately prior to
-        # this part payment. The closest reliable source is the EMI amount
-        # on loan-paid rows just before the payment date, falling back to
-        # the loan's current emi_amount if nothing else is available.
-        prior_paid = [r for r in regular if r["status"] == "Paid" and r["due_date"] < pay_date]
-        emi_before = float(prior_paid[-1]["emi_amount"]) if prior_paid else emi_after
+# ── Part-Payment Interest Savings ─────────────────────────────────────
 
-        remaining_months_before = len(
-            [r for r in regular if r["due_date"] >= pay_date]
-        ) + 1  # +1 to include the EMI that would have covered this payment's period
+def _amortize_interest_only(balance: float, annual_rate: float, emi_amount: float,
+                            months: int) -> list[float]:
+    """
+    Simulate a simple amortization and return the interest component
+    paid each month (length up to `months`, stops early if balance hits 0).
+    Used only for comparison purposes — does not touch the DB or real schedule.
+    """
+    r = annual_rate / 12 / 100
+    out = []
+    bal = balance
+    for i in range(months):
+        if bal <= 0:
+            break
+        interest = _r2(bal * r)
+        principal_comp = _r2(emi_amount - interest)
+        if i == months - 1 or principal_comp > bal:
+            principal_comp = _r2(bal)
+        bal = _r2(max(0.0, bal - principal_comp))
+        out.append(interest)
+        if bal == 0:
+            break
+    return out
 
-        result = calc.calculate_part_payment_savings(
-            loan_id=loan_id,
-            annual_rate=annual_rate,
-            balance_before=balance_before,
-            balance_after=balance_after,
-            emi_before=emi_before,
-            emi_after=emi_after,
-            remaining_months_before=remaining_months_before,
-            payment_date=pay_date,
-        )
-        result["payment_id"] = pp["payment_id"]
-        result["payment_date"] = pay_date
-        result["amount_paid"] = float(pp["amount_paid"])
-        results.append(result)
 
-        for m in result["monthly_savings"]:
-            combined[m["month"]] = combined.get(m["month"], 0.0) + m["interest_saved"]
-        combined_total += result["total_interest_saved"]
+def calculate_part_payment_savings(
+    loan_id: str,
+    annual_rate: float,
+    balance_before: float,
+    balance_after: float,
+    emi_before: float,
+    emi_after: float,
+    remaining_months_before: int,
+    payment_date: str,
+) -> dict:
+    """
+    Compare two parallel amortizations — "as if this part payment never
+    happened" (balance_before/emi_before/remaining_months_before) vs.
+    "what actually happened after the part payment" (balance_after/emi_after)
+    — and return interest saved per month going forward, plus a total.
 
-    combined_monthly = [
-        {"month": m, "interest_saved": round(combined[m], 2)}
-        for m in sorted(combined.keys())
-    ]
+    This is a what-if comparison for display purposes; it does not alter
+    any stored schedule.
+    """
+    without_pp = _amortize_interest_only(
+        balance_before, annual_rate, emi_before, remaining_months_before
+    )
+    # Give the "after" simulation generous headroom (it should finish sooner
+    # or in the same time since principal dropped) but never longer than "before".
+    with_pp = _amortize_interest_only(
+        balance_after, annual_rate, emi_after, remaining_months_before
+    )
 
-    return ok({
+    months = max(len(without_pp), len(with_pp))
+    due = datetime.strptime(payment_date, "%Y-%m-%d").date()
+    # Part payment effect starts applying from the next due month
+    due = due + relativedelta(months=1)
+
+    monthly = []
+    total_saved = 0.0
+    for i in range(months):
+        interest_without = without_pp[i] if i < len(without_pp) else 0.0
+        interest_with = with_pp[i] if i < len(with_pp) else 0.0
+        saved = _r2(interest_without - interest_with)
+        total_saved += saved
+        monthly.append({
+            "month": (due + relativedelta(months=i)).strftime("%Y-%m"),
+            "interest_without_part_payment": interest_without,
+            "interest_with_part_payment": interest_with,
+            "interest_saved": saved,
+        })
+
+    return {
         "loan_id": loan_id,
-        "part_payments": results,
-        "combined_monthly_savings": combined_monthly,
-        "combined_total_saved": round(combined_total, 2),
-    })
+        "monthly_savings": monthly,
+        "total_interest_saved": _r2(total_saved),
+        "months_compared": months,
+    }
 
+def compute_summary(loan: dict, schedule: list[dict], payments: list[dict]) -> dict:
+    total_paid = sum(float(p["amount_paid"]) for p in payments)
+    total_interest = sum(
+        float(r["interest_component"]) for r in schedule if r["status"] == "Paid"
+    )
+    # Exclude pre-EMI row from outstanding/remaining counts
+    regular = [r for r in schedule if not r.get("is_pre_emi")]
+    unpaid  = [r for r in regular   if r["status"] in ("Unpaid", "Partial")]
 
-# ── Part Payment ──────────────────────────────────────────────────────
+    if unpaid:
+        outstanding = float(unpaid[0]["outstanding_balance"]) + float(unpaid[0]["principal_component"])
+    else:
+        outstanding = 0.0
 
-@app.route("/api/loans/<loan_id>/part-payment", methods=["POST"])
-def part_payment(loan_id):
-    body = request.get_json(force=True)
-    try:
-        require(body, "amount", "payment_date")
-        loan = db.get_loan(loan_id)
-        if not loan:         return err(f"Loan {loan_id} not found", 404)
-        if loan["status"] == "Closed": return err("Loan is already closed")
-
-        schedule = db.get_schedule(loan_id)
-        regular_unpaid = [r for r in schedule if r["status"] in ("Unpaid","Partial") and not r.get("is_pre_emi")]
-        if not regular_unpaid: return err("No outstanding regular EMIs")
-
-        next_emi    = regular_unpaid[0]
-        outstanding = float(next_emi["outstanding_balance"]) + float(next_emi["principal_component"])
-        amount      = float(body["amount"])
-
-        if amount >= outstanding:
-            return err(f"Part payment ₹{amount:,.0f} ≥ outstanding ₹{outstanding:,.0f}. Use foreclosure.")
-
-        new_balance     = round(outstanding - amount, 2)
-        reduce_emi      = bool(body.get("reduce_emi", False))
-        remaining_months= len(regular_unpaid)
-        current_emi     = float(loan["emi_amount"])
-
-        new_emi_amt, new_schedule = calc.recalculate_after_part_payment(
-            loan_id, new_balance, float(loan["interest_rate"]),
-            remaining_months, next_emi["due_date"], reduce_emi, current_emi,
-            start_emi_number=int(next_emi["emi_number"]),
-        )
-
-        db.delete_unpaid_from(loan_id, int(next_emi["emi_number"]))
-        db.insert_schedule_rows(new_schedule)
-
-        payment_id = "PAY" + uuid.uuid4().hex[:8].upper()
-        db.insert_payment({
-            "loan_id": loan_id, "payment_id": payment_id,
-            "payment_date": str(body["payment_date"]), "amount_paid": amount,
-            "payment_type": "Part Payment", "emi_number": None,
-            "remaining_balance_after_payment": new_balance,
-            "notes": str(body.get("notes", "Part Payment")),
-            "created_at": now_str(),
-        })
-
-        update = {"updated_at": now_str()}
-        if reduce_emi: update["emi_amount"] = new_emi_amt
-        db.update_loan(loan_id, update)
-
-        sheets_sync.push_async()
-        return ok({
-            "payment_id": payment_id, "new_balance": new_balance,
-            "new_emi": new_emi_amt, "remaining_emis": len(new_schedule),
-            "message": f"Part payment ₹{amount:,.0f} applied. {'EMI reduced to ₹'+f'{new_emi_amt:,.2f}' if reduce_emi else f'Tenure reduced to {len(new_schedule)} months'}."
-        })
-    except (ValueError, TypeError) as e:
-        return err(str(e))
-
-
-# ── Rate Change ───────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/update-rate", methods=["POST"])
-def update_rate(loan_id):
-    body = request.get_json(force=True)
-    try:
-        require(body, "new_rate")
-        loan = db.get_loan(loan_id)
-        if not loan:         return err(f"Loan {loan_id} not found", 404)
-        if loan["status"] == "Closed": return err("Loan is already closed")
-
-        schedule = db.get_schedule(loan_id)
-        unpaid   = [r for r in schedule if r["status"] in ("Unpaid","Partial") and not r.get("is_pre_emi")]
-        if not unpaid: return err("No outstanding EMIs to apply rate change")
-
-        from_emi   = int(body["from_emi"]) if body.get("from_emi") else unpaid[0]["emi_number"]
-        apply_from = next((r for r in unpaid if r["emi_number"] == from_emi), unpaid[0])
-        outstanding= float(apply_from["outstanding_balance"]) + float(apply_from["principal_component"])
-        rem_months = len([r for r in unpaid if r["emi_number"] >= apply_from["emi_number"]])
-        new_rate   = float(body["new_rate"])
-
-        new_emi_amt, new_schedule = calc.recalculate_after_rate_change(
-            loan_id, outstanding, new_rate, rem_months, apply_from["due_date"],
-            start_emi_number=int(apply_from["emi_number"]),
-        )
-
-        db.delete_unpaid_from(loan_id, int(apply_from["emi_number"]))
-        db.insert_schedule_rows(new_schedule)
-        db.update_loan(loan_id, {"interest_rate": new_rate, "emi_amount": new_emi_amt, "updated_at": now_str()})
-
-        sheets_sync.push_async()
-        return ok({
-            "new_rate": new_rate, "new_emi": new_emi_amt,
-            "applied_from_emi": apply_from["emi_number"],
-            "remaining_emis": len(new_schedule),
-            "message": f"Rate changed to {new_rate}% from EMI #{apply_from['emi_number']}. New EMI: ₹{new_emi_amt:,.2f}"
-        })
-    except (ValueError, TypeError) as e:
-        return err(str(e))
-
-
-# ── Foreclose ─────────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/foreclose", methods=["POST"])
-def foreclose(loan_id):
-    body = request.get_json(force=True)
-    try:
-        require(body, "payment_date")
-        loan = db.get_loan(loan_id)
-        if not loan:         return err(f"Loan {loan_id} not found", 404)
-        if loan["status"] == "Closed": return err("Loan already closed")
-
-        schedule = db.get_schedule(loan_id)
-        unpaid   = [r for r in schedule if r["status"] in ("Unpaid","Partial")]
-        if not unpaid: return err("No outstanding EMIs")
-
-        regular_unpaid = [r for r in unpaid if not r.get("is_pre_emi")]
-        next_emi    = regular_unpaid[0] if regular_unpaid else unpaid[0]
-        outstanding = float(next_emi["outstanding_balance"]) + float(next_emi["principal_component"])
-        pay_date    = str(body["payment_date"])
-
-        payment_id = "PAY" + uuid.uuid4().hex[:8].upper()
-        db.insert_payment({
-            "loan_id": loan_id, "payment_id": payment_id,
-            "payment_date": pay_date, "amount_paid": outstanding,
-            "payment_type": "Prepayment", "emi_number": None,
-            "remaining_balance_after_payment": 0.0,
-            "notes": "Loan Foreclosure", "created_at": now_str(),
-        })
-
-        for emi in unpaid:
-            db.update_emi_status(loan_id, emi["emi_number"], "Paid", pay_date)
-
-        db.update_loan(loan_id, {"status": "Closed", "updated_at": now_str()})
-        sheets_sync.push_async()
-        return ok({"payment_id": payment_id, "foreclosure_amount": round(outstanding, 2),
-                   "message": f"Loan closed. Paid ₹{outstanding:,.2f}"})
-    except (ValueError, TypeError) as e:
-        return err(str(e))
-
-
-# ── PDF Report ────────────────────────────────────────────────────────
-
-@app.route("/api/loans/<loan_id>/report")
-def download_report(loan_id):
-    loan = db.get_loan(loan_id)
-    if not loan: return err(f"Loan {loan_id} not found", 404)
-    schedule = db.get_schedule(loan_id)
-    payments = db.get_payments(loan_id)
-    summary  = calc.compute_summary(loan, schedule, payments)
-    pdf_bytes= generate_pdf(loan, schedule, payments, summary)
-    return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf",
-                     as_attachment=True, download_name=f"loan_{loan_id}.pdf")
-
-
-# ── Error handlers ────────────────────────────────────────────────────
-
-@app.errorhandler(404)
-def not_found(e):   return err("Not found", 404)
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.exception("Unhandled error")
-    return err("Internal server error", 500)
-
-
-# ── Run ───────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"""
-╔══════════════════════════════════════════╗
-║       LoanLedger — EMI Calculator        ║
-╠══════════════════════════════════════════╣
-║  Open:     http://localhost:{port}         ║
-║  Database: {db.DB_PATH[-40:]:<40}║
-╚══════════════════════════════════════════╝
-""")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    next_emi_date = unpaid[0]["due_date"] if unpaid else "Loan Closed"
+    return {
+        "loan_id": loan["loan_id"],
+        "total_paid": round(total_paid, 2),
+        "total_interest_paid": round(total_interest, 2),
+        "outstanding_principal": round(outstanding, 2),
+        "remaining_emis": len(unpaid),
+        "next_emi_date": next_emi_date,
+        "pre_emi_interest": loan.get("pre_emi_interest", 0),
+        "pre_emi_days": loan.get("pre_emi_days", 0),
+        "sanction_date": loan.get("sanction_date", ""),
+    }
