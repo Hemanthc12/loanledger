@@ -1,7 +1,0 @@
-flask==3.0.0
-flask-cors==4.0.0
-reportlab==4.1.0
-python-dateutil==2.9.0
-gspread>=6.0.0
-google-auth>=2.0.0
-gunicorn==22.0.0

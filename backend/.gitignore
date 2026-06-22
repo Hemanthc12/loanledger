@@ -1,9 +1,0 @@
-__pycache__/
-*.pyc
-venv/
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
-cred.json
-.env
