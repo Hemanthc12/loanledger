@@ -117,9 +117,47 @@ tr:hover td{background:var(--sur2)}
 
 @media(max-width:700px){
   .sidebar{display:none}
+  .nav-tabs{display:none}
+  .topbar{padding:0 14px;gap:8px}
+  .logo{margin-right:auto;font-size:16px}
+  .topbar-right{gap:6px}
+  #api-status-text,#sync-text{display:none}
+  #btn-pull,#btn-push{padding:4px 8px;font-size:10px}
+  .content{padding:14px}
+  .pg-header{padding:14px}
   .g4{grid-template-columns:1fr 1fr}
   .g3,.g2{grid-template-columns:1fr}
+
+  /* Hamburger button replaces the hidden desktop tabs */
+  .hamburger{display:flex!important;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;background:var(--sur2);border:1px solid var(--bd);cursor:pointer;flex-shrink:0;order:-1;margin-right:4px}
+  .hamburger span{display:block;width:16px;height:2px;background:var(--tx);position:relative}
+  .hamburger span::before,.hamburger span::after{content:'';position:absolute;left:0;width:16px;height:2px;background:var(--tx)}
+  .hamburger span::before{top:-5px}
+  .hamburger span::after{top:5px}
+
+  /* Bottom tab bar: the 5 most-used destinations, always visible, native-app feel */
+  .bottom-nav{display:flex!important;position:fixed;left:0;right:0;bottom:0;height:60px;background:var(--sur);border-top:1px solid var(--bd);z-index:50;padding-bottom:env(safe-area-inset-bottom)}
+  .bnav-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--tx3);font-size:9.5px;font-weight:500;cursor:pointer;border:none;background:none;letter-spacing:.01em}
+  .bnav-item.active{color:var(--ac)}
+  .bnav-icon{font-size:17px;line-height:1}
+  body{padding-bottom:60px}
+  .main{padding-bottom:env(safe-area-inset-bottom)}
+
+  /* Slide-in drawer: everything else (Tools section + Settings), opened via hamburger */
+  .drawer-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:90}
+  .drawer-overlay.open{display:block}
+  .drawer{position:fixed;top:0;left:0;height:100%;width:78vw;max-width:300px;background:var(--sur);border-right:1px solid var(--bd);z-index:91;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;padding:16px 0;overflow-y:auto}
+  .drawer.open{transform:translateX(0)}
+  .drawer-head{padding:4px 18px 16px;font-size:17px;font-weight:700;border-bottom:1px solid var(--bd);margin-bottom:8px;padding-bottom:14px}
+  .drawer-head span{color:var(--ac)}
+  .drawer .nav-sec{padding:14px 18px 6px}
+  .drawer .sitem{padding:11px 18px;font-size:14px;margin:0;border-radius:0}
+  .drawer .sitem-icon{font-size:15px}
 }
+@media(min-width:701px){
+  .hamburger,.bottom-nav,.drawer,.drawer-overlay{display:none!important}
+}
+
 @media print{
   .topbar,.sidebar,#sync-banner,.topbar-right,#btn-pull,#btn-push,.btn{display:none!important}
   body{height:auto;overflow:visible;background:#fff;color:#000}
@@ -137,6 +175,7 @@ tr:hover td{background:var(--sur2)}
 
 <!-- Top bar -->
 <div class="topbar">
+  <div class="hamburger" id="hamburger-btn" onclick="openDrawer()"><span></span></div>
   <div class="logo">Loan<span>Ledger</span></div>
   <div class="nav-tabs" id="nav-tabs"></div>
   <div class="topbar-right">
@@ -155,8 +194,16 @@ tr:hover td{background:var(--sur2)}
 </div>
 
 <div class="app">
-  <!-- Sidebar -->
+  <!-- Sidebar (desktop) -->
   <nav class="sidebar" id="sidebar"></nav>
+
+  <!-- Drawer (mobile) -->
+  <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+  <nav class="drawer" id="drawer">
+    <div class="drawer-head">Loan<span>Ledger</span></div>
+    <div id="drawer-items"></div>
+  </nav>
+
   <!-- Main -->
   <div class="main">
     <div class="pg-header">
@@ -166,6 +213,9 @@ tr:hover td{background:var(--sur2)}
     <div class="content" id="content"></div>
   </div>
 </div>
+
+<!-- Bottom nav (mobile) -->
+<nav class="bottom-nav" id="bottom-nav"></nav>
 
 <script>
 /* Mobile builds: server URL + passphrase are configured once and stored
@@ -273,20 +323,53 @@ const NAV = [
     {p:'analyser', icon:'◎',label:'Loan Analyser'},
   ]},
 ];
+// Bottom nav shows the 5 most-used destinations; everything else lives in the drawer.
+const BOTTOM_NAV_PAGES = ['dashboard', 'loans', 'create', 'payment', 'analyser'];
+const BOTTOM_NAV_ICONS = {dashboard:'◈', loans:'⊞', create:'＋', payment:'↑', analyser:'◎'};
+
 function buildNav() {
   const sb = document.getElementById('sidebar');
   const tabs = document.getElementById('nav-tabs');
+  const bnav = document.getElementById('bottom-nav');
+  const drawerItems = document.getElementById('drawer-items');
+
   let groups = NAV;
   if (isNativeBuild()) {
     groups = NAV.concat([{sec:'App', items:[{p:'__settings',icon:'⚙',label:'Settings'}]}]);
   }
+
+  // Desktop sidebar
   sb.innerHTML = groups.map(g =>
     `<div class="nav-sec">${g.sec}</div>` +
     g.items.map(it => `<div class="sitem${S.page===it.p?' active':''}" onclick="${it.p==='__settings'?'openSettingsScreen()':`nav('${it.p}')`}"><span class="sitem-icon">${it.icon}</span>${it.label}</div>`).join('')
   ).join('');
+
+  // Desktop horizontal tabs (top bar)
   tabs.innerHTML = ['dashboard','loans','create','schedule','payment','calculator','analyser'].map(p =>
     `<div class="ntab${S.page===p?' active':''}" onclick="nav('${p}')">${PAGES[p][0]}</div>`
+  ).join('') + (isNativeBuild() ? `<div class="ntab" onclick="openSettingsScreen()">⚙ Settings</div>` : '');
+
+  // Mobile bottom nav — fixed 5 primary destinations, always visible, never hidden/cut off
+  bnav.innerHTML = BOTTOM_NAV_PAGES.map(p =>
+    `<button class="bnav-item${S.page===p?' active':''}" onclick="nav('${p}')">
+       <span class="bnav-icon">${BOTTOM_NAV_ICONS[p]}</span>${PAGES[p][0]}
+     </button>`
+  ).join('') + `<button class="bnav-item" onclick="openDrawer()"><span class="bnav-icon">☰</span>More</button>`;
+
+  // Mobile drawer — every section (including ones not on the bottom bar) + Settings
+  drawerItems.innerHTML = groups.map(g =>
+    `<div class="nav-sec">${g.sec}</div>` +
+    g.items.map(it => `<div class="sitem${S.page===it.p?' active':''}" onclick="${it.p==='__settings'?'openSettingsScreen();closeDrawer()':`nav('${it.p}');closeDrawer()`}"><span class="sitem-icon">${it.icon}</span>${it.label}</div>`).join('')
   ).join('');
+}
+
+function openDrawer() {
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer-overlay').classList.add('open');
+}
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.remove('open');
 }
 
 async function nav(p) {
