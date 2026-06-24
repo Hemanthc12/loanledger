@@ -57,6 +57,9 @@ _EXEMPT_PATHS = {"/api/health", "/api/auth/check"}
 
 @app.before_request
 def _check_passphrase():
+    if request.method == "OPTIONS":
+        return  # CORS preflight — browsers never attach custom headers here;
+                 # must pass through untouched or the real request gets blocked
     if not APP_PASSPHRASE:
         return  # auth disabled (local dev)
     if not request.path.startswith("/api/"):
