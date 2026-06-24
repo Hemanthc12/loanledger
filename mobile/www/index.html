@@ -232,8 +232,13 @@ function saveSettings(serverUrl, passphrase) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ serverUrl, passphrase }));
 }
 function isNativeBuild() {
-  // window.location.protocol is 'http(s):' on web, 'capacitor:'/'file:' inside the app
-  return window.location.protocol === 'capacitor:' || window.location.protocol === 'file:';
+  // Capacitor injects window.Capacitor in every native build, regardless of
+  // which URL scheme it's configured to serve pages over (capacitor:, file:,
+  // or https: for androidScheme:'https' setups, which this app uses).
+  // Also keep the old scheme check as a harmless extra safety net.
+  return typeof window.Capacitor !== 'undefined'
+    || window.location.protocol === 'capacitor:'
+    || window.location.protocol === 'file:';
 }
 let BASE = isNativeBuild() ? (getSettings().serverUrl || '').replace(/\/$/, '') : window.location.origin;
 
@@ -1699,13 +1704,25 @@ async function startApp() {
   }, 4000);
 }
 
-(function init() {
+function runInit() {
   if (isNativeBuild()) {
     const { serverUrl } = getSettings();
+    BASE = serverUrl || BASE;
+    buildNav(); // refresh nav now that native status is confirmed (adds Settings)
     if (!serverUrl) { showSetupScreen(); return; }
-    BASE = serverUrl;
   }
   startApp();
+}
+
+(function init() {
+  // Capacitor's bridge (window.Capacitor) can attach a beat after this
+  // script starts running. Listen for its ready event, but don't block
+  // forever — fall back to an immediate check after a short timeout so
+  // the app still opens promptly either way.
+  let started = false;
+  const go = () => { if (!started) { started = true; runInit(); } };
+  document.addEventListener('capacitorReady', go);
+  setTimeout(go, 150);
 })();
 function showSetupScreen(message) {
   const { serverUrl, passphrase } = getSettings();
