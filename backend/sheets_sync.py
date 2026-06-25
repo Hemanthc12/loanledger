@@ -68,6 +68,16 @@ def init(creds_path: str, sheet_id: str) -> bool:
                 _gc.http_client.timeout = (10, 30)
             except Exception:
                 logger.warning("Could not set gspread request timeout")
+        # set_timeout above bounds only the data request — NOT the OAuth token
+        # refresh google-auth performs inside the same AuthorizedSession, which
+        # defaults to no timeout (refresh_timeout=None). A stalled token
+        # endpoint would therefore still hang a pull/push until the 45s watchdog
+        # trips. Bound the refresh too so the call fails fast with a clean error
+        # instead of silently wedging the thread. (best-effort, private attr)
+        try:
+            _gc.http_client.session._refresh_timeout = 30
+        except Exception:
+            pass
         _sheet_id = sheet_id
         # Quick connectivity check
         ss = _gc.open_by_key(sheet_id)

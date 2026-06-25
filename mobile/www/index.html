@@ -1640,6 +1640,9 @@ function _timeAgo(iso) {
 }
 
 let _syncPollActive = false;
+let _syncPollDeadline = 0;        // wall-clock ms; bounds how long we sit on a "pulling" status
+const SYNC_POLL_MAX_MS = 60000;   // a backend wedged in a no-timeout network call can report
+                                  // pulling:true forever — never wait (or spin the banner) longer
 
 async function checkSyncStatus() {
   try {
@@ -1653,22 +1656,40 @@ async function checkSyncStatus() {
       txt.textContent = 'Sheets: off';
       ban.style.display = 'none';
       _syncPollActive = false;
+      _syncPollDeadline = 0;
       return;
     }
     if (st.pulling) {
-      dot.style.background = 'var(--am)';
-      txt.textContent = 'Syncing…';
-      ban.style.display = 'flex';
-      // Only schedule the next poll if one isn't already pending — prevents
-      // multiple overlapping polling loops from different call sites
-      // (startApp, the delayed re-check, etc.) hammering the server.
-      if (!_syncPollActive) {
-        _syncPollActive = true;
-        setTimeout(() => { _syncPollActive = false; checkSyncStatus(); }, 2000);
+      // Bound the wait. If the server's startup pull is wedged (e.g. a Sheets
+      // API call with no timeout), it reports pulling:true indefinitely — we
+      // must never let that hold the banner and this polling loop open forever.
+      // The loan data is already loaded straight from the server's DB, so once
+      // the cap is hit we stop waiting and invite a manual retry via ↓ Pull.
+      if (!_syncPollDeadline) _syncPollDeadline = Date.now() + SYNC_POLL_MAX_MS;
+      if (Date.now() < _syncPollDeadline) {
+        dot.style.background = 'var(--am)';
+        txt.textContent = 'Syncing…';
+        ban.style.display = 'flex';
+        // Only schedule the next poll if one isn't already pending — prevents
+        // multiple overlapping polling loops from different call sites
+        // (startApp, the delayed re-check, etc.) hammering the server.
+        if (!_syncPollActive) {
+          _syncPollActive = true;
+          setTimeout(() => { _syncPollActive = false; checkSyncStatus(); }, 2000);
+        }
+        return;
       }
+      // Cap exceeded — stop waiting on a sync that isn't completing.
+      _syncPollActive = false;
+      _syncPollDeadline = 0;
+      ban.style.display = 'none';
+      dot.style.background = 'var(--am)';
+      txt.textContent = 'Sheets: sync slow';
+      txt.title = 'Google Sheets sync is taking too long and was stopped. Your data is loaded from the server — tap ↓ Pull to try syncing again.';
       return;
     }
     _syncPollActive = false;
+    _syncPollDeadline = 0;
     ban.style.display = 'none';
     if (st.pull_error || st.push_error) {
       dot.style.background = 'var(--rd)';
@@ -1684,6 +1705,7 @@ async function checkSyncStatus() {
 
 async function syncPull() {
   const btn = document.getElementById('btn-pull');
+  _syncPollDeadline = 0;   // fresh manual attempt — re-open the bounded wait window
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span>';
   try {
