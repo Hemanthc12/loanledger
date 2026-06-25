@@ -213,11 +213,45 @@ def pull_bg():
     threading.Thread(target=_safe_pull, name="sheets-pull", daemon=True).start()
 
 
+# Maximum time we'll wait for a pull before giving up on it and resetting
+# state. gspread/google-auth don't set network timeouts by default, so a
+# stalled connection to Google's API can otherwise hang this thread forever
+# — leaving `_pulling` stuck True and the app showing "Loading..." endlessly.
+PULL_TIMEOUT_SECONDS = 45
+
+
 def _safe_pull():
-    try:
-        pull_all()
-    except Exception:
-        pass
+    """
+    Runs pull_all() in its own watchdog-supervised sub-thread. If it doesn't
+    finish within PULL_TIMEOUT_SECONDS, we give up waiting and reset state
+    so the app recovers — even though the underlying thread (stuck in a
+    network call with no timeout) may continue running harmlessly in the
+    background until/unless it eventually errors out on its own.
+    """
+    global _busy, _pulling, _pull_err
+
+    result = {"done": False, "error": None}
+
+    def _run():
+        try:
+            pull_all()
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            result["done"] = True
+
+    t = threading.Thread(target=_run, name="sheets-pull-worker", daemon=True)
+    t.start()
+    t.join(timeout=PULL_TIMEOUT_SECONDS)
+
+    if not result["done"]:
+        logger.warning(
+            "Sheets pull exceeded %ss timeout — resetting status so the app "
+            "isn't stuck. The underlying request may still complete in the "
+            "background; local data is unaffected.", PULL_TIMEOUT_SECONDS
+        )
+        _pull_err = f"Pull timed out after {PULL_TIMEOUT_SECONDS}s — Google Sheets may be slow or unreachable. Local data was not changed."
+        _busy = _pulling = False
 
 
 # ── Push: SQLite → Sheets ─────────────────────────────────────────────
@@ -269,10 +303,28 @@ def push_async():
 
 
 def _safe_push():
-    try:
-        push_all()
-    except Exception:
-        pass
+    """Same watchdog pattern as _safe_pull — see its docstring for why this
+    is needed (gspread/google-auth calls have no default network timeout)."""
+    global _busy, _push_err
+
+    result = {"done": False}
+
+    def _run():
+        try:
+            push_all()
+        except Exception:
+            pass
+        finally:
+            result["done"] = True
+
+    t = threading.Thread(target=_run, name="sheets-push-worker", daemon=True)
+    t.start()
+    t.join(timeout=PULL_TIMEOUT_SECONDS)
+
+    if not result["done"]:
+        logger.warning("Sheets push exceeded %ss timeout — resetting status.", PULL_TIMEOUT_SECONDS)
+        _push_err = f"Push timed out after {PULL_TIMEOUT_SECONDS}s — Google Sheets may be slow or unreachable."
+        _busy = False
 
 
 # ── Status ────────────────────────────────────────────────────────────
