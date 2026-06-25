@@ -20,6 +20,7 @@ from datetime import datetime
 import gspread
 
 import database as db
+import emi_calculator as calc
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +191,11 @@ def pull_all() -> str:
         ss = _open_ss()
 
         ws_l = _get_or_create_ws(ss, "loans",        LOANS_COLS)
+        ws_s = _get_or_create_ws(ss, "emi_schedule",  SCHEDULE_COLS)
         ws_p = _get_or_create_ws(ss, "payments",      PAYMENTS_COLS)
 
         loans    = _read_ws(ws_l)
+        schedule = _read_ws(ws_s)
         payments = _read_ws(ws_p)
 
         if not loans and not payments:
@@ -200,23 +203,28 @@ def pull_all() -> str:
             _pull_err  = None
             return "Google Sheets tabs created — no data yet (local data retained)"
 
-        # Pull loans + payments from Sheets into SQLite.
-        # emi_schedule is NOT pulled from Sheets — it is always generated
-        # locally from the loan data and kept authoritative in SQLite.
-        # We clear the sheet tab and rewrite it from local data to fix any
-        # corruption (e.g. emi_number stored as empty string).
-        schedule = db.all_schedule()
+        # Google Sheets is the durable store: this app runs on hosts with an
+        # ephemeral disk (e.g. Render free tier), so SQLite is wiped on every
+        # restart/deploy. Restore ALL THREE tables from Sheets — including
+        # emi_schedule. Earlier versions wrongly treated the schedule as
+        # local-only and rewrote the sheet from the (empty, just-wiped) local
+        # DB, which silently destroyed the amortization schedule and broke the
+        # analyser, add-payment and amortization views.
         db.replace_all(loans, schedule, payments)
 
-        # Rewrite the emi_schedule sheet from the now-correct local data
-        ws_s = _get_or_create_ws(ss, "emi_schedule", SCHEDULE_COLS)
-        _write_ws(ws_s, SCHEDULE_COLS, db.all_schedule())
+        # Recovery: if a loan ended up with no schedule rows (e.g. the tab was
+        # blanked by an older buggy pull, or this loan predates the schedule
+        # ever being pushed), rebuild it from the loan's own terms and persist
+        # back to Sheets. We never blank a schedule that Sheets still holds.
+        rebuilt = _rebuild_missing_schedules()
+        if rebuilt:
+            _write_ws(ws_s, SCHEDULE_COLS, db.all_schedule())
 
         _last_pull = datetime.now()
         _pull_err  = None
-        msg = (f"Pulled {len(loans)} loans, "
-               f"{len(payments)} payments — "
-               f"emi_schedule rebuilt from local data")
+        msg = (f"Pulled {len(loans)} loans, {len(schedule)} schedule rows, "
+               f"{len(payments)} payments"
+               + (f" — rebuilt {rebuilt} missing schedule(s) from loan terms" if rebuilt else ""))
         logger.info(msg)
         return msg
 
@@ -227,6 +235,113 @@ def pull_all() -> str:
 
     finally:
         _busy = _pulling = False
+
+
+def _reconstruct_schedule(loan: dict, payments: list[dict]) -> list[dict]:
+    """
+    Rebuild one loan's amortization schedule from the loan terms + the payments
+    ledger. The payments tab is the key input: its ``remaining_balance_after_payment``
+    column records the real outstanding balance after each EMI / part-payment /
+    prepayment, so the projected (unpaid) tail is re-anchored to that balance
+    rather than to the original-terms math — which is how part-payments and EMI
+    reductions get reflected.
+
+    Layout:
+      • EMIs up to the highest paid EMI number: taken from the original-terms
+        amortization (historical rows), marked Paid with their payment dates.
+      • Remaining EMIs: projected from the latest balance in the ledger using the
+        loan's CURRENT emi/rate. generate_schedule stops once the balance hits 0,
+        so a tenure reduction is handled as well as an EMI reduction.
+
+    Best-effort: it can't reproduce the exact mid-stream rows of a part-payment
+    era, nor the pre-EMI stub (sanction_date isn't stored). When exact figures
+    matter, restoring the emi_schedule tab from Google Sheets version history is
+    preferred. Only ever used for loans that have NO schedule rows at all.
+    """
+    loan_id   = loan["loan_id"]
+    principal = float(loan["loan_amount"])
+    rate      = float(loan["interest_rate"])
+    tenure    = int(loan["tenure_months"])
+    start     = loan["start_date"]
+    emi_amt   = float(loan["emi_amount"])
+    closed    = str(loan.get("status")) == "Closed"
+
+    pays = sorted(payments, key=lambda p: (str(p.get("payment_date") or ""), p.get("id") or 0))
+
+    # EMIs that were paid, and when (EMI-type payments carrying an emi_number).
+    paid_on = {int(p["emi_number"]): (p.get("payment_date") or "")
+               for p in pays
+               if p.get("emi_number") is not None and str(p.get("payment_type")) == "EMI"}
+    max_paid = max(paid_on) if paid_on else 0
+
+    # Latest outstanding balance known from the ledger (reflects part payments,
+    # prepayments and the most recent EMI). Falls back to the original principal.
+    anchor_bal = principal
+    for p in pays:
+        rb = p.get("remaining_balance_after_payment")
+        if rb is not None and str(rb).strip() != "":
+            anchor_bal = float(rb)
+
+    # Original-terms amortization — supplies the paid-era rows and their due dates.
+    base = calc.generate_schedule(
+        loan_id=loan_id, principal=principal, annual_rate=rate,
+        tenure_months=tenure, start_date=start, emi_amount=emi_amt,
+    )
+    regular = [r for r in base if not r.get("is_pre_emi")]
+
+    if closed:
+        # Closure/foreclosure marks every EMI Paid (mirrors the foreclose flow),
+        # so reconstruct the full original schedule with all rows Paid.
+        for r in regular:
+            r["status"] = "Paid"
+            if r["emi_number"] in paid_on:
+                r["paid_date"] = paid_on[r["emi_number"]]
+        return regular
+
+    prefix = [r for r in regular if r["emi_number"] <= max_paid]
+
+    # Project remaining EMIs from the real current balance using current emi/rate.
+    tail = []
+    if anchor_bal > 0:
+        next_due = next((r["due_date"] for r in regular if r["emi_number"] == max_paid + 1),
+                        regular[-1]["due_date"] if regular else start)
+        tail = calc.generate_schedule(
+            loan_id=loan_id, principal=anchor_bal, annual_rate=rate,
+            tenure_months=max(1, tenure), start_date=next_due,
+            emi_amount=emi_amt, outstanding_balance=anchor_bal,
+            start_emi_number=max_paid + 1,
+        )
+
+    sched = prefix + tail
+    for r in sched:
+        if r["emi_number"] in paid_on:
+            r["status"]    = "Paid"
+            r["paid_date"] = paid_on[r["emi_number"]]
+    return sched
+
+
+def _rebuild_missing_schedules() -> int:
+    """
+    For any loan with no emi_schedule rows after a pull, rebuild its schedule
+    from loan terms + the payments ledger (see _reconstruct_schedule). Loans that
+    already have a schedule are left untouched. Returns the number rebuilt.
+    """
+    rebuilt = 0
+    for loan in db.list_loans():
+        if db.get_schedule(loan["loan_id"]):
+            continue
+        try:
+            sched = _reconstruct_schedule(loan, db.get_payments(loan["loan_id"]))
+        except Exception as e:
+            logger.warning("Could not rebuild schedule for %s: %s", loan["loan_id"], e)
+            continue
+        if not sched:
+            continue
+        db.insert_schedule_rows(sched)
+        rebuilt += 1
+        logger.info("Rebuilt %d schedule rows for loan %s from loan terms + payments",
+                    len(sched), loan["loan_id"])
+    return rebuilt
 
 
 def pull_bg():
@@ -298,13 +413,25 @@ def push_all() -> str:
         payments = db.all_payments()
 
         _write_ws(ws_l, LOANS_COLS,    loans)
-        _write_ws(ws_s, SCHEDULE_COLS, schedule)
+        # Safety: never overwrite the Sheet's schedule with an empty local one
+        # while loans exist. That state means the local DB was wiped/half-loaded
+        # (ephemeral disk) and pushing would destroy the durable schedule that
+        # Sheets is holding. Skip the schedule tab and preserve it instead.
+        schedule_pushed = bool(schedule) or not loans
+        if schedule_pushed:
+            _write_ws(ws_s, SCHEDULE_COLS, schedule)
+        else:
+            logger.warning(
+                "Skipping emi_schedule push: local schedule is empty but %d loan(s) "
+                "exist — preserving the schedule already in Sheets (DB not yet restored).",
+                len(loans),
+            )
         _write_ws(ws_p, PAYMENTS_COLS, payments)
 
         _last_push = datetime.now()
         _push_err  = None
         msg = (f"Pushed {len(loans)} loans, "
-               f"{len(schedule)} schedule rows, "
+               f"{len(schedule) if schedule_pushed else 'skipped'} schedule rows, "
                f"{len(payments)} payments")
         logger.info(msg)
         return msg
