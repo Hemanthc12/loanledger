@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn -w 1 -b 0.0.0.0:$PORT app:app"
+    startCommand: "gunicorn -w 1 --threads 4 -k gthread --timeout 120 --graceful-timeout 30 -b 0.0.0.0:$PORT app:app"
     envVars:
       - key: APP_PASSPHRASE
         sync: false

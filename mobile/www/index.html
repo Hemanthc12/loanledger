@@ -255,12 +255,26 @@ const S = {
 };
 
 /* ═══════════════════════════ API ══════════════════════════════ */
-async function api(path, method='GET', body=null) {
+async function api(path, method='GET', body=null, timeoutMs=60000) {
   const { passphrase } = getSettings();
   const opts = { method, headers: {'Content-Type':'application/json'} };
   if (passphrase) opts.headers['X-App-Passphrase'] = passphrase;
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(BASE + path, opts);
+  // Abort the request if the server doesn't respond in time, so a slow or
+  // unreachable backend surfaces as a clear error instead of a button that
+  // spins forever ("Loading… nothing happens").
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  opts.signal = ctrl.signal;
+  let r;
+  try {
+    r = await fetch(BASE + path, opts);
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Request timed out — the server may be slow or unreachable. Please try again.');
+    throw new Error('Could not reach the server. Check your connection.');
+  } finally {
+    clearTimeout(timer);
+  }
   const json = await r.json();
   if (!json.success) {
     if (r.status === 401 && isNativeBuild()) {

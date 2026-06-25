@@ -56,6 +56,18 @@ def init(creds_path: str, sheet_id: str) -> bool:
     global _gc, _sheet_id, _enabled
     try:
         _gc       = gspread.service_account(filename=creds_path)
+        # Give EVERY Sheets API call a connect+read deadline. gspread 6.x
+        # defaults to no timeout (waits forever), so a slow/stalled call —
+        # especially on the synchronous /api/sync/pull and /api/sync/push
+        # endpoints — would hang the request and leave the app's Pull/Push
+        # button spinning indefinitely. (10s connect, 30s read.)
+        try:
+            _gc.set_timeout((10, 30))
+        except Exception:
+            try:
+                _gc.http_client.timeout = (10, 30)
+            except Exception:
+                logger.warning("Could not set gspread request timeout")
         _sheet_id = sheet_id
         # Quick connectivity check
         ss = _gc.open_by_key(sheet_id)
