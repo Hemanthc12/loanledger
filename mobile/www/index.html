@@ -340,7 +340,7 @@ function buildNav() {
 
   let groups = NAV;
   if (isNativeBuild()) {
-    groups = NAV.concat([{sec:'App', items:[{p:'__settings',icon:'⚙',label:'Settings'}]}]);
+    groups = NAV.concat([{sec:'⚙ App', items:[{p:'__settings',icon:'⚙',label:'Settings'}]}]);
   }
 
   // Desktop sidebar
@@ -1625,6 +1625,8 @@ function _timeAgo(iso) {
   return Math.floor(s/3600) + 'h ago';
 }
 
+let _syncPollActive = false;
+
 async function checkSyncStatus() {
   try {
     const st = await api('/api/sync/status');
@@ -1636,15 +1638,23 @@ async function checkSyncStatus() {
       dot.style.background = 'var(--tx3)';
       txt.textContent = 'Sheets: off';
       ban.style.display = 'none';
+      _syncPollActive = false;
       return;
     }
     if (st.pulling) {
       dot.style.background = 'var(--am)';
       txt.textContent = 'Syncing…';
       ban.style.display = 'flex';
-      setTimeout(checkSyncStatus, 2000);
+      // Only schedule the next poll if one isn't already pending — prevents
+      // multiple overlapping polling loops from different call sites
+      // (startApp, the delayed re-check, etc.) hammering the server.
+      if (!_syncPollActive) {
+        _syncPollActive = true;
+        setTimeout(() => { _syncPollActive = false; checkSyncStatus(); }, 2000);
+      }
       return;
     }
+    _syncPollActive = false;
     ban.style.display = 'none';
     if (st.pull_error || st.push_error) {
       dot.style.background = 'var(--rd)';
@@ -1710,6 +1720,8 @@ function runInit() {
     BASE = serverUrl || BASE;
     buildNav(); // refresh nav now that native status is confirmed (adds Settings)
     if (!serverUrl) { showSetupScreen(); return; }
+  } else {
+    console.log('[LoanLedger] Running as web — native features (Settings) hidden by design.');
   }
   startApp();
 }
@@ -1741,20 +1753,50 @@ function showSetupScreen(message) {
       <input id="setup-pass" type="password" placeholder="Shared passphrase" value="${passphrase || ''}"
         style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:#18181f;color:#f0f0f8;font-size:13px;margin-bottom:18px;">
       <button id="setup-save" style="width:100%;padding:11px;border-radius:8px;border:none;background:#6c63ff;color:white;font-size:14px;font-weight:600;cursor:pointer;">Connect</button>
+      <button id="setup-clear" style="width:100%;padding:9px;margin-top:8px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:transparent;color:#8888a0;font-size:12.5px;cursor:pointer;">Clear saved values</button>
       <div id="setup-status" style="font-size:12px;color:#8888a0;margin-top:10px;text-align:center;min-height:16px;"></div>
     </div>`;
   document.body.appendChild(el);
 
+  document.getElementById('setup-clear').onclick = () => {
+    document.getElementById('setup-url').value = '';
+    document.getElementById('setup-pass').value = '';
+    saveSettings('', '');
+    document.getElementById('setup-status').textContent = 'Cleared. Type the address fresh.';
+  };
+
   document.getElementById('setup-save').onclick = async () => {
     const url = document.getElementById('setup-url').value.trim().replace(/\/$/, '');
-    const pass = document.getElementById('setup-pass').value;
+    const pass = document.getElementById('setup-pass').value.trim();
     const statusEl = document.getElementById('setup-status');
     if (!url) { statusEl.textContent = 'Server URL is required.'; return; }
-    statusEl.textContent = 'Connecting…';
-    saveSettings(url, pass);
-    BASE = url;
+
+    // Validate the URL is well-formed before saving it anywhere. This catches
+    // corrupted/double-pasted input (e.g. autocomplete merging old + new text)
+    // immediately, with a clear message, instead of silently saving garbage
+    // that fails later with a vague "could not connect" / "failed to fetch".
+    let parsed;
     try {
-      const r = await fetch(url + '/api/auth/check', {
+      parsed = new URL(url);
+    } catch {
+      statusEl.textContent = 'That URL doesn\'t look valid. Clear the field completely and retype it — e.g. https://your-app.onrender.com';
+      return;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      statusEl.textContent = 'URL must start with https:// or http://';
+      return;
+    }
+    if (!parsed.hostname.includes('.')) {
+      statusEl.textContent = 'That doesn\'t look like a real server address. Check for typos.';
+      return;
+    }
+    const cleanUrl = parsed.origin; // normalized, strips any stray trailing path/garbage
+
+    statusEl.textContent = 'Connecting…';
+    saveSettings(cleanUrl, pass);
+    BASE = cleanUrl;
+    try {
+      const r = await fetch(cleanUrl + '/api/auth/check', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ passphrase: pass }),
       });
@@ -1763,7 +1805,7 @@ function showSetupScreen(message) {
       el.remove();
       startApp();
     } catch (e) {
-      statusEl.textContent = 'Could not reach server. Check the URL and your connection.';
+      statusEl.textContent = 'Could not reach server. Check the URL and your connection. (' + e.message + ')';
     }
   };
 }
