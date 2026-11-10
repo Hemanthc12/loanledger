@@ -85,8 +85,8 @@ def generate_schedule(
 
     balance = outstanding_balance if outstanding_balance is not None else principal
     due_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-    # Regular EMI interest uses actual elapsed calendar days / 365.
-    previous_due_date = due_date - relativedelta(months=1)
+    # Regular EMI interest uses monthly reducing-balance method:
+    # opening balance * annual rate / 12.
     rows = []
 
     # ── EMI #0: Pre-EMI stub interest ──
@@ -105,17 +105,13 @@ def generate_schedule(
                 "paid_date": "",
                 "is_pre_emi": 1,
             })
-            due_date = due_date + relativedelta(months=1)  # ← advance so EMI #1 starts next month
+            due_date = due_date + relativedelta(months=1)  # EMI #1 starts next month
 
     # ── Regular EMIs #1..n ──
     for i in range(tenure_months):
         emi_num = start_emi_number + i
-        period_days = (due_date - previous_due_date).days
-        if period_days <= 0:
-            raise ValueError("EMI due dates must be in chronological order")
-        interest = _r2(
-            balance * (float(annual_rate) / 100.0) * period_days / 365.0
-        )
+        monthly_rate = float(annual_rate) / 12.0 / 100.0
+        interest = _r2(balance * monthly_rate)
         if i == 0 and first_interest is not None:
             interest = _r2(first_interest)
         principal_comp = _r2(emi_amount - interest)
@@ -162,14 +158,16 @@ def calculate_split_interest(
     cycle_end_date: str | None = None,
 ) -> float:
     """
-    Calculate one EMI cycle's split-period interest on an Actual/365 basis.
+    Calculate part-payment cycle interest using PNB-style monthly reducing
+    balance, split proportionally by actual days within the EMI cycle.
 
-    Interest for each segment:
-        balance * annual_rate / 100 * actual_days / 365
+    Full-cycle interest = opening_balance * annual_rate / 12.
+    Each segment receives its fraction of that month's interest:
+        segment_interest = segment_balance * monthly_rate
+                           * segment_days / total_cycle_days
 
-    Each part payment reduces the balance from its payment date onward.
-    Dates are actual calendar dates, so 31-day months contribute 31 days,
-    February contributes 28/29 days, and leap years are handled naturally.
+    This preserves one full monthly interest charge across 30- or 31-day
+    calendar cycles, while reducing the balance from each part-payment date.
     """
     prev = date.fromisoformat(str(prev_emi_date))
     end = (
@@ -192,27 +190,25 @@ def calculate_split_interest(
                 f"({prev.isoformat()} to {end.isoformat()})"
             )
         events.append((pay_dt, amount))
-
     events.sort(key=lambda item: item[0])
 
     balance = float(opening_balance)
     if balance <= 0:
         raise ValueError("Opening balance must be greater than zero")
 
-    annual_daily_rate = float(annual_rate) / 100.0 / 365.0
+    monthly_rate = float(annual_rate) / 100.0 / 12.0
     cursor = prev
     interest = 0.0
-
     for pay_dt, amount in events:
-        segment_days = (pay_dt - cursor).days
-        interest += balance * annual_daily_rate * segment_days
+        days = (pay_dt - cursor).days
+        interest += balance * monthly_rate * days / total_days
         balance -= amount
         if balance < -0.005:
             raise ValueError("Part payments exceed the outstanding principal")
         balance = max(0.0, balance)
         cursor = pay_dt
 
-    interest += balance * annual_daily_rate * (end - cursor).days
+    interest += balance * monthly_rate * (end - cursor).days / total_days
     return _r2(interest)
 
 

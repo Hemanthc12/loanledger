@@ -58,8 +58,8 @@ class State:
 
 def resplit_schedule(loan, schedule, payments):
     """
-    Recompute interest for every EMI cycle using Actual/365, splitting at
-    each part-payment date. Paid rows keep their status and
+    Recompute interest using monthly reducing-balance interest, splitting
+    a cycle proportionally by actual days when part-payments occur. Paid rows keep their status and
     amounts; later balances and unpaid EMIs flow from the new figures.
     Payments are never modified. Returns (new_rows, report).
     """
@@ -122,12 +122,7 @@ def resplit_schedule(loan, schedule, payments):
                 bal, rate, prev.isoformat(), cyc, cycle_end_date=due.isoformat()
             )
         else:
-            period_days = (due - prev).days
-            if period_days <= 0:
-                raise ValueError("EMI due dates must be in chronological order")
-            interest = calc._r2(
-                bal * (rate / 100.0) * period_days / 365.0
-            )
+            interest = calc._r2(bal * (rate / 100.0) / 12.0)
         bal_after = round(bal - pp_sum, 2)
 
         is_paid = row["status"] in ("Paid", "Partial")
