@@ -412,13 +412,20 @@ function badge(s) {
 function alertHTML() {
   if (!S.alert) return '';
   const cls = {success:'al-s',error:'al-e',info:'al-i',warning:'al-w'};
-  return `<div class="alert ${cls[S.alert.type]||'al-i'}">${S.alert.msg}</div>`;
+  return `<div id="app-alert" class="alert ${cls[S.alert.type]||'al-i'}">${S.alert.msg}</div>`;
 }
 
 function showAlert(msg, type='info') {
-  S.alert = {msg,type};
-  render();
-  setTimeout(()=>{S.alert=null;render();},5000);
+  S.alert = {msg, type};
+  const c = document.getElementById('content');
+  document.querySelectorAll('#app-alert').forEach(e => e.remove());
+  c.insertAdjacentHTML('afterbegin', alertHTML());
+  document.querySelector('.main')?.scrollTo({top:0, behavior:'smooth'});
+  clearTimeout(window._alT);
+  window._alT = setTimeout(() => {
+    S.alert = null;
+    document.querySelectorAll('#app-alert').forEach(e => e.remove());
+  }, 5000);
 }
 
 function loanSel(blank=false) {
@@ -429,7 +436,7 @@ function loanSel(blank=false) {
 }
 
 async function selLoan(id) {
-  S.sel = id; S.schedule=[]; S.payments=[]; S.summary=null;
+  S.sel = id; S.schedule=[]; S.payments=[]; S.summary=null; S.savings=null;
   if (id) { try { await loadLoanData(id); } catch(e) { showAlert(e.message,'error'); } }
   render();
 }
@@ -488,7 +495,7 @@ function pgLoans() {
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div class="ctitle" style="margin:0">All Loans</div>
-      <button class="btn btn-p btn-sm" onclick="nav('create')">＋ New</button>
+      <button class="btn btn-r btn-sm" onclick="delLoan('${l.loan_id}')">Delete</button>
     </div>
     ${S.loans.length===0
       ? `<div class="empty"><div class="empty-icon">⊘</div><div>No loans yet</div></div>`
@@ -692,14 +699,15 @@ function pgPayment() {
       ${S.payments.length===0
         ?'<div class="empty"><div class="empty-icon">↑</div><div>No payments recorded</div></div>'
         :`<div class="twrap"><table>
-          <thead><tr><th>Payment ID</th><th>Date</th><th>Amount</th><th>Type</th><th>EMI#</th><th>Balance After</th></tr></thead>
+          <thead><tr><th>Payment ID</th><th>Date</th><th>Amount</th><th>Type</th><th>EMI#</th><th>Balance After</th><th></th></tr></thead>
           <tbody>${S.payments.map(p=>`<tr>
             <td style="color:var(--tx3);font-size:9px">${p.payment_id}</td>
             <td>${p.payment_date}</td>
             <td style="color:var(--gr)">${fc(p.amount_paid)}</td>
             <td>${p.payment_type}</td>
-            <td>${p.emi_number||'—'}</td>
+            <td>${p.emi_number ?? '—'}</td>
             <td>${fc(p.remaining_balance_after_payment)}</td>
+            <td><button class="btn btn-r btn-sm" onclick="delPayment('${p.payment_id}')">🗑 Delete</button></td>
           </tr>`).join('')}</tbody>
         </table></div>`}
     </div>
@@ -726,6 +734,33 @@ async function doPayment() {
     await loadLoans();await loadLoanData(loanId);
     showAlert(res.message,'success');render();
   } catch(e){showAlert(e.message,'error');btn.disabled=false;btn.innerHTML='↑ Record Payment';}
+}
+
+async function delPayment(paymentId, force=false) {
+  const loanId = S.sel; if (!loanId) return;
+  const p = S.payments.find(x => x.payment_id === paymentId);
+  if (!force && !confirm(`Delete this ${p?.payment_type||'entry'} of ${fc(p?.amount_paid)} dated ${p?.payment_date}?\n\nThe schedule will be recalculated.`)) return;
+  try {
+    const res = await api(`/api/loans/${loanId}/payments/${paymentId}${force?'?force=1':''}`, 'DELETE');
+    await loadLoans(); await loadLoanData(loanId);
+    showAlert(res.message, 'success'); render();
+  } catch(e) {
+    if (e.message.startsWith('LEGACY:')) {
+      if (confirm(e.message.slice(7).trim() + '\n\nContinue anyway?')) return delPayment(paymentId, true);
+      return;
+    }
+    showAlert(e.message, 'error');
+  }
+}
+
+async function delLoan(id) {
+  if (!confirm(`Permanently delete loan ${id} with ALL its payments and schedule?\nThis cannot be undone.`)) return;
+  try {
+    await api(`/api/loans/${id}`, 'DELETE');
+    if (S.sel === id) { S.sel=null; S.schedule=[]; S.payments=[]; S.summary=null; S.savings=null; }
+    await loadLoans(); render();
+    showAlert(`Loan ${id} deleted`, 'success');
+  } catch(e) { showAlert(e.message, 'error'); }
 }
 
 function pgPartpay() {
@@ -769,6 +804,7 @@ function pgPartpaySavings() {
     return `<div class="card" style="margin-top:16px">
       <div class="ctitle">Interest Saved from Part Payments</div>
       <div class="empty"><div>No part payments recorded yet for this loan.</div></div>
+      <button class="btn btn-r btn-sm" style="margin-top:8px" onclick="delPayment('${pp.payment_id}')">🗑 Delete this part payment</button>
     </div>`;
   }
 
@@ -824,6 +860,12 @@ function pgRatechg() {
       <div class="alert al-i">Past paid EMIs are never touched. New rate applies only to future EMIs.</div>
       <div class="fg"><label class="flabel">Select Loan</label>${loanSel(true)}</div>
       <div class="fg"><label class="flabel">New Annual Rate (%)</label><input class="finput" id="rc-rate" type="number" step="0.01" placeholder="e.g. 9.25"></div>
+      <div class="fg"><label class="flabel">What should change?</label>
+        <select class="finput" id="rc-mode">
+          <option value="0">Change EMI — keep same tenure</option>
+          <option value="1">Change tenure — keep same EMI</option>
+        </select>
+      </div>
       <div class="fg"><label class="flabel">Apply from EMI # (optional — default: next unpaid)</label><input class="finput" id="rc-emi" type="number" placeholder="Leave blank for next unpaid EMI"></div>
       <button class="btn btn-p btn-full" id="rc-btn" onclick="doRatechg()">% Apply Rate Change</button>
     </div>
@@ -846,7 +888,7 @@ async function doRatechg() {
   if(!loanId||!rate){showAlert('Please fill all fields','error');return;}
   btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
   try {
-    const body={new_rate:rate};
+    const body={new_rate:rate, keep_emi: document.getElementById('rc-mode')?.value==='1'};
     const fromEMI=document.getElementById('rc-emi')?.value;
     if(fromEMI)body.from_emi=parseInt(fromEMI);
     const res=await api(`/api/loans/${loanId}/update-rate`,'POST',body);
@@ -916,7 +958,14 @@ function pgForeclose() {
         </select>
       </div>
       <div class="fg"><label class="flabel">Foreclosure Date</label><input class="finput" id="fc-date" type="date" value="${today}"></div>
-      ${S.summary?`<div class="met rd" style="margin-bottom:14px"><div class="mlabel">Amount to Pay (Outstanding Principal)</div><div class="mval" style="font-size:22px">${fc(S.summary.outstanding_principal)}</div></div>`:''}
+      ${S.summary ? `
+      <div class="met rd" style="margin-bottom:14px">
+          <div class="mlabel">Amount to Pay (Foreclosure Amount)</div>
+          <div class="mval" style="font-size:22px">
+              ${fc(S.summary.foreclosure_amount ?? S.summary.outstanding_principal)}
+          </div>
+      </div>
+      ` : ''}
       <button class="btn btn-r btn-full" id="fc-btn" onclick="doForeclose()" ${!S.sel?'disabled':''}>✕ Close Loan Now</button>
     </div>
     <div class="card">

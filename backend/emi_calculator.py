@@ -188,8 +188,38 @@ def recalculate_after_rate_change(
     remaining_months: int,
     next_due_date: str,
     start_emi_number: int = 1,
+    keep_emi: bool = False,
+    current_emi: float | None = None,
 ) -> tuple[float, list[dict]]:
-    """Recalculate from next EMI with a new rate."""
+    """
+    Recalculate from the next EMI with a new rate.
+      keep_emi=False -> same remaining months, EMI changes.
+      keep_emi=True  -> same EMI, tenure changes (longer if rate went up).
+    """
+    r = new_annual_rate / 12 / 100
+
+    if keep_emi and current_emi:
+        if r == 0:
+            n = math.ceil(outstanding_balance / current_emi - 1e-9)
+        else:
+            if current_emi <= outstanding_balance * r:
+                raise ValueError(
+                    f"Current EMI ₹{current_emi:,.2f} does not even cover the monthly "
+                    f"interest (₹{outstanding_balance * r:,.2f}) at {new_annual_rate}%. "
+                    f"Choose 'Change EMI' instead."
+                )
+            n = math.ceil(
+                -math.log(1 - (outstanding_balance * r) / current_emi) / math.log(1 + r) - 1e-9
+            )
+        n = max(1, n)
+        schedule = generate_schedule(
+            loan_id=loan_id, principal=outstanding_balance,
+            annual_rate=new_annual_rate, tenure_months=n,
+            start_date=next_due_date, outstanding_balance=outstanding_balance,
+            emi_amount=current_emi, start_emi_number=start_emi_number,
+        )
+        return current_emi, schedule
+
     schedule = generate_schedule(
         loan_id=loan_id, principal=outstanding_balance,
         annual_rate=new_annual_rate, tenure_months=remaining_months,
