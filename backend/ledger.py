@@ -6,7 +6,7 @@ for live actions and when replaying history after a delete.
 import json
 import uuid
 from datetime import datetime, date, timedelta
-
+from dateutil.relativedelta import relativedelta
 import emi_calculator as calc
 
 TYPE_PART = "Part Payment"
@@ -175,10 +175,25 @@ def apply_part_payment(st, ev):
     reduce_emi = bool(_meta(ev).get("reduce_emi", False))
     new_balance = round(outstanding - amount, 2)
     cut = int(nxt["emi_number"])
+    rate = float(st.loan["interest_rate"])
+    pay_date = str(ev["payment_date"])
+
+    # ── Split-period interest for this EMI cycle ──
+    next_due = str(nxt["due_date"])
+    prev_due = (date.fromisoformat(next_due) - relativedelta(months=1)).isoformat()
+    # earlier part payments already applied inside this same cycle
+    same_cycle = [(str(p["payment_date"]), float(p["amount_paid"]))
+                  for p in st.payments
+                  if p["payment_type"] == TYPE_PART
+                  and prev_due < str(p["payment_date"]) < next_due]
+    opening = outstanding + sum(a for _, a in same_cycle)   # balance at the previous EMI date
+    cycle_interest = calc.calculate_split_interest(
+        opening, rate, prev_due, same_cycle + [(pay_date, amount)])
+
     new_emi, new_sched = calc.recalculate_after_part_payment(
-        st.loan["loan_id"], new_balance, float(st.loan["interest_rate"]),
+        st.loan["loan_id"], new_balance, rate,
         len(reg), nxt["due_date"], reduce_emi, float(st.loan["emi_amount"]),
-        start_emi_number=cut,
+        start_emi_number=cut, first_interest=cycle_interest,
     )
     st.schedule = [r for r in st.schedule
                    if not (r["status"] in OPEN and int(r["emi_number"]) >= cut)] + new_sched
@@ -190,8 +205,9 @@ def apply_part_payment(st, ev):
            else f"Tenure reduced to {len(new_sched)} months")
     return {"payment_id": row["payment_id"], "new_balance": new_balance,
             "new_emi": new_emi, "remaining_emis": len(new_sched),
-            "message": f"Part payment ₹{amount:,.0f} applied. {msg}."}
-
+            "next_emi_interest": cycle_interest,
+            "message": f"Part payment ₹{amount:,.0f} applied. {msg}. "
+                       f"EMI #{cut} interest (split-period): ₹{cycle_interest:,.2f}."}
 
 def apply_rate_change(st, ev):
     if st.loan["status"] == "Closed":

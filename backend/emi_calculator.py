@@ -71,6 +71,7 @@ def generate_schedule(
     emi_amount: float | None = None,
     start_emi_number: int = 1,
     outstanding_balance: float | None = None,
+    first_interest: float | None = None,   # NEW: overrides interest of the first regular EMI    
 ) -> list[dict]:
     """
     Generate full amortization schedule.
@@ -109,6 +110,8 @@ def generate_schedule(
     for i in range(tenure_months):
         emi_num = start_emi_number + i
         interest = _r2(balance * r)
+        if i == 0 and first_interest is not None:
+            interest = _r2(first_interest)
         principal_comp = _r2(emi_amount - interest)
 
         if i == tenure_months - 1:          # last EMI: clear any residual
@@ -140,46 +143,96 @@ def generate_schedule(
 
     return rows
 
+def calculate_split_interest(opening_balance: float, annual_rate: float,
+                             prev_emi_date: str,
+                             part_payments: list[tuple[str, float]]) -> float:
+    """
+    Interest for one EMI cycle, split at every part-payment date.
+    30-day month basis: each segment earns  balance * (rate/12) * days/30.
+    The cycle is always 30 days in total, so a 31-day month is not over-charged.
+    part_payments: [(payment_date 'YYYY-MM-DD', amount), ...] falling in this cycle.
+    """
+    r = annual_rate / 12 / 100
+    prev = datetime.strptime(prev_emi_date, "%Y-%m-%d").date()
 
+    events = []
+    for d, amt in part_payments:
+        off = (datetime.strptime(str(d), "%Y-%m-%d").date() - prev).days
+        events.append((min(30, max(0, off)), float(amt)))
+    events.sort(key=lambda e: e[0])
+
+    bal, cursor, interest = float(opening_balance), 0, 0.0
+    for off, amt in events:
+        interest += bal * r * (off - cursor) / 30
+        bal -= amt
+        cursor = off
+    interest += bal * r * (30 - cursor) / 30
+    return _r2(interest)
 # ── Post-event recalculations ─────────────────────────────────────────
+
+def _nper(balance: float, r: float, emi: float) -> int:
+    """Months needed to clear `balance` paying `emi` at monthly rate r."""
+    if balance <= 0:
+        return 0
+    if r == 0:
+        return math.ceil(balance / emi - 1e-9)
+    if emi <= balance * r:
+        raise ValueError("EMI does not cover the monthly interest")
+    return math.ceil(-math.log(1 - (balance * r) / emi) / math.log(1 + r) - 1e-9)
+
 
 def recalculate_after_part_payment(
     loan_id: str,
-    outstanding_balance: float,
+    outstanding_balance: float,      # balance AFTER the part payment
     annual_rate: float,
     remaining_months: int,
     next_due_date: str,
     reduce_emi: bool = False,
     current_emi: float | None = None,
     start_emi_number: int = 1,
+    first_interest: float | None = None,   # split-period interest for the next EMI
 ) -> tuple[float, list[dict]]:
-    """After part payment: reduce tenure (default) or reduce EMI."""
+    """After part payment: reduce tenure (default) or reduce EMI.
+    The first EMI's interest is first_interest (if given); later EMIs use normal
+    reducing-balance interest."""
     r = annual_rate / 12 / 100
+    B = outstanding_balance
 
-    if not reduce_emi and current_emi and r > 0:
-        if current_emi > outstanding_balance * r:
-            n = math.ceil(
-                -math.log(1 - (outstanding_balance * r) / current_emi) / math.log(1 + r)
-            )
-            remaining_months = max(1, n)
-            # use existing EMI amount (tenure shortens)
+    if not reduce_emi and current_emi:
+        try:
+            if first_interest is None:
+                n = _nper(B, r, current_emi)
+            else:
+                b1 = B + first_interest - current_emi     # balance after the first EMI
+                n = 1 + _nper(b1, r, current_emi) if b1 > 0 else 1
+            n = max(1, n)
             schedule = generate_schedule(
-                loan_id=loan_id, principal=outstanding_balance,
-                annual_rate=annual_rate, tenure_months=remaining_months,
-                start_date=next_due_date, outstanding_balance=outstanding_balance,
+                loan_id=loan_id, principal=B, annual_rate=annual_rate,
+                tenure_months=n, start_date=next_due_date, outstanding_balance=B,
                 emi_amount=current_emi, start_emi_number=start_emi_number,
+                first_interest=first_interest,
             )
             return current_emi, schedule
+        except ValueError:
+            pass   # EMI too small for the rate -> fall through to "recompute EMI"
 
+    n, emi = remaining_months, None
+    if first_interest is not None:
+        if n <= 1:
+            emi = _r2(B + first_interest)
+        elif r == 0:
+            emi = _r2((B + first_interest) / n)
+        else:
+            a = (1 - (1 + r) ** -(n - 1)) / r
+            emi = _r2((B + first_interest) / (1 + a))
     schedule = generate_schedule(
-        loan_id=loan_id, principal=outstanding_balance,
-        annual_rate=annual_rate, tenure_months=remaining_months,
-        start_date=next_due_date, outstanding_balance=outstanding_balance,
-        start_emi_number=start_emi_number,
+        loan_id=loan_id, principal=B, annual_rate=annual_rate,
+        tenure_months=n, start_date=next_due_date, outstanding_balance=B,
+        emi_amount=emi, start_emi_number=start_emi_number,
+        first_interest=first_interest,
     )
     new_emi = schedule[0]["emi_amount"] if schedule else 0.0
     return new_emi, schedule
-
 
 def recalculate_after_rate_change(
     loan_id: str,
