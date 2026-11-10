@@ -343,6 +343,19 @@ def part_payment(loan_id):
     _persist(st)
     return ok(info)
 
+@app.route("/api/loans/<loan_id>/recalculate", methods=["POST"])
+@locked
+def recalculate(loan_id):
+    body = request.get_json(silent=True) or {}
+    st = _state(loan_id)
+    new_rows, rep = ledger.resplit_schedule(st.loan, st.schedule, st.payments)
+    if body.get("preview"):
+        return ok({**rep, "saved": False})
+    db.replace_schedule(loan_id, new_rows)
+    sheets_sync.push_async()
+    return ok({**rep, "saved": True,
+               "message": f"Schedule recalculated. {len(rep['part_payment_cycles'])} part-payment cycle(s) re-split; "
+                          f"payoff now {rep['new_last_due']} (was {rep['old_last_due']})."})
 
 def _interest_by_month(schedule):
     out = {}

@@ -217,6 +217,12 @@ def all_payments() -> list:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM payments ORDER BY loan_id, id").fetchall()]
 
+def replace_schedule(loan_id: str, rows: list):
+    """Replace only this loan's schedule rows. Payments are not touched."""
+    sched = [{**r, "loan_id": loan_id} for r in rows]
+    with get_conn() as conn:
+        conn.execute("DELETE FROM emi_schedule WHERE loan_id = ?", (loan_id,))
+        conn.executemany(_SCHED_SQL, sched)
 
 def replace_all(loans: list, schedule: list, payments: list):
     def _n(v):

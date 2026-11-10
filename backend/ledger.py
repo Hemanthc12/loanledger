@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import emi_calculator as calc
+from dateutil.relativedelta import relativedelta
 
 TYPE_PART = "Part Payment"
 TYPE_RATE = "Rate Change"
@@ -56,6 +57,99 @@ class State:
         self.schedule = [dict(r) for r in schedule]
         self.payments = [dict(p) for p in payments]
 
+def resplit_schedule(loan, schedule, payments):
+    """
+    Recompute interest for every EMI cycle that contains a part payment
+    (split at the payment date, 30-day basis). Paid rows keep their status and
+    amounts; later balances and unpaid EMIs flow from the new figures.
+    Payments are never modified. Returns (new_rows, report).
+    """
+    if any(p["payment_type"] == TYPE_RATE for p in payments):
+        raise ValueError("This loan has rate-change entries; recalculating it in place isn't supported yet.")
+
+    rate = float(loan["interest_rate"])
+    r = rate / 12 / 100
+    emi_now = float(loan["emi_amount"])
+    pps = [(str(p["payment_date"]), float(p["amount_paid"]))
+           for p in payments if p["payment_type"] == TYPE_PART]
+
+    paid_on = {}
+    for p in sorted(payments, key=_order):
+        if p["payment_type"] not in _NON_EMI and p.get("emi_number") not in (None, ""):
+            paid_on[int(p["emi_number"])] = str(p["payment_date"])
+
+    rows = sorted((dict(x) for x in schedule), key=lambda x: int(x["emi_number"]))
+    pre, reg = [], []
+    for x in rows:
+        if int(x["emi_number"]) == 0 or _is_pre(x):
+            x["is_pre_emi"] = 1          # repairs rows saved with the flag missing
+            pre.append(x)
+        else:
+            reg.append(x)
+    if not reg:
+        raise ValueError("No regular EMI rows to recalculate")
+
+    old_int = {int(x["emi_number"]): float(x["interest_component"]) for x in reg}
+    old_total = sum(old_int.values())
+    old_last = str(reg[-1]["due_date"])
+
+    bal = float(loan["loan_amount"])
+    out, i = [], 0
+    last_due = date.fromisoformat(old_last)
+    next_no = int(reg[-1]["emi_number"]) + 1
+    cycles = []
+
+    while i < 1200 and bal > 0.005:
+        if i < len(reg):
+            row = reg[i]
+            due = date.fromisoformat(str(row["due_date"]))
+        else:
+            last_due = last_due + relativedelta(months=1)
+            due = last_due
+            row = {"loan_id": loan["loan_id"], "emi_number": next_no,
+                   "due_date": due.isoformat(), "status": "Unpaid",
+                   "paid_date": "", "is_pre_emi": 0}
+            next_no += 1
+        i += 1
+
+        prev = due - relativedelta(months=1)
+        cyc = [(d, a) for d, a in pps if prev <= date.fromisoformat(d) < due]
+        pp_sum = sum(a for _, a in cyc)
+        if cyc:
+            interest = calc.calculate_split_interest(bal, rate, prev.isoformat(), cyc)
+        else:
+            interest = calc._r2(bal * r)
+        bal_after = round(bal - pp_sum, 2)
+
+        is_paid = row["status"] in ("Paid", "Partial")
+        emi = float(row["emi_amount"]) if is_paid else emi_now
+        princ = round(emi - interest, 2)
+        if princ <= 0:
+            raise ValueError(f"EMI ₹{emi:,.2f} doesn't cover interest ₹{interest:,.2f} in EMI #{row['emi_number']}")
+        if princ >= bal_after - 0.005:
+            princ = bal_after
+            emi = round(interest + princ, 2)
+
+        row.update(emi_amount=emi, interest_component=interest, principal_component=princ,
+                   outstanding_balance=max(0.0, round(bal_after - princ, 2)), is_pre_emi=0)
+        if row["status"] == "Paid" and int(row["emi_number"]) in paid_on:
+            row["paid_date"] = paid_on[int(row["emi_number"])]
+        if cyc:
+            cycles.append({"emi_number": int(row["emi_number"]), "due_date": row["due_date"],
+                           "old_interest": old_int.get(int(row["emi_number"])),
+                           "new_interest": interest})
+        out.append(row)
+        bal = row["outstanding_balance"]
+
+    new_rows = sorted(pre + out, key=lambda x: int(x["emi_number"]))
+    report = {
+        "part_payment_cycles": cycles,
+        "rows_before": len(reg), "rows_after": len(out),
+        "old_last_due": old_last, "new_last_due": out[-1]["due_date"],
+        "old_total_interest": round(old_total, 2),
+        "new_total_interest": round(sum(x["interest_component"] for x in out), 2),
+    }
+    return new_rows, report
 
 def _open(st, regular_only=False):
     return [r for r in st.schedule

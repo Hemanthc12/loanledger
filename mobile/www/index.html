@@ -74,7 +74,7 @@ body{background:var(--bg);color:var(--tx);height:100vh;overflow:hidden;display:f
 select.finput option{background:var(--sur2)}
 
 /* ── Buttons ── */
-.btn{padding:9px 18px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:none;transition:all .15s;font-family:'Syne',sans-serif;display:inline-flex;align-items:center;gap:5px}
+.btn{padding:9px 18px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:none;transition:all .15s;font-family:'Syne',sans-serif;display:inline-flex;align-items:center;gap:5px;text-decoration:none}
 .btn-p{background:var(--ac);color:#fff}.btn-p:hover{background:#7c73ff}
 .btn-s{background:var(--sur2);color:var(--tx);border:1px solid var(--bd2)}.btn-s:hover{background:var(--sur3)}
 .btn-g{background:rgba(34,197,94,.15);color:var(--gr);border:1px solid rgba(34,197,94,.25)}.btn-g:hover{background:rgba(34,197,94,.25)}
@@ -135,7 +135,7 @@ tr:hover td{background:var(--sur2)}
   .hamburger span::before{top:-5px}
   .hamburger span::after{top:5px}
 
-  /* Bottom tab bar: the 5 most-used destinations, always visible, native-app feel */
+  /* Bottom tab bar */
   .bottom-nav{display:flex!important;position:fixed;left:0;right:0;bottom:0;height:60px;background:var(--sur);border-top:1px solid var(--bd);z-index:50;padding-bottom:env(safe-area-inset-bottom)}
   .bnav-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--tx3);font-size:9.5px;font-weight:500;cursor:pointer;border:none;background:none;letter-spacing:.01em}
   .bnav-item.active{color:var(--ac)}
@@ -143,7 +143,7 @@ tr:hover td{background:var(--sur2)}
   body{padding-bottom:60px}
   .main{padding-bottom:env(safe-area-inset-bottom)}
 
-  /* Slide-in drawer: everything else (Tools section + Settings), opened via hamburger */
+  /* Slide-in drawer */
   .drawer-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:90}
   .drawer-overlay.open{display:block}
   .drawer{position:fixed;top:0;left:0;height:100%;width:78vw;max-width:300px;background:var(--sur);border-right:1px solid var(--bd);z-index:91;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;padding:16px 0;overflow-y:auto}
@@ -219,8 +219,7 @@ tr:hover td{background:var(--sur2)}
 
 <script>
 /* Mobile builds: server URL + passphrase are configured once and stored
-   on-device (Capacitor's WebView has its own localStorage, separate per
-   app install). Falls back to same-origin for the plain web version. */
+   on-device. Falls back to same-origin for the plain web version. */
 const SETTINGS_KEY = 'loanledger_settings';
 function getSettings() {
   try {
@@ -232,10 +231,6 @@ function saveSettings(serverUrl, passphrase) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ serverUrl, passphrase }));
 }
 function isNativeBuild() {
-  // Capacitor injects window.Capacitor in every native build, regardless of
-  // which URL scheme it's configured to serve pages over (capacitor:, file:,
-  // or https: for androidScheme:'https' setups, which this app uses).
-  // Also keep the old scheme check as a harmless extra safety net.
   return typeof window.Capacitor !== 'undefined'
     || window.location.protocol === 'capacitor:'
     || window.location.protocol === 'file:';
@@ -260,9 +255,6 @@ async function api(path, method='GET', body=null, timeoutMs=60000) {
   const opts = { method, headers: {'Content-Type':'application/json'} };
   if (passphrase) opts.headers['X-App-Passphrase'] = passphrase;
   if (body) opts.body = JSON.stringify(body);
-  // Abort the request if the server doesn't respond in time, so a slow or
-  // unreachable backend surfaces as a clear error instead of a button that
-  // spins forever ("Loading… nothing happens").
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   opts.signal = ctrl.signal;
@@ -342,7 +334,6 @@ const NAV = [
     {p:'analyser', icon:'◎',label:'Loan Analyser'},
   ]},
 ];
-// Bottom nav shows the 5 most-used destinations; everything else lives in the drawer.
 const BOTTOM_NAV_PAGES = ['dashboard', 'loans', 'create', 'payment', 'analyser'];
 const BOTTOM_NAV_ICONS = {dashboard:'◈', loans:'⊞', create:'＋', payment:'↑', analyser:'◎'};
 
@@ -357,25 +348,21 @@ function buildNav() {
     groups = NAV.concat([{sec:'⚙ App', items:[{p:'__settings',icon:'⚙',label:'Settings'}]}]);
   }
 
-  // Desktop sidebar
   sb.innerHTML = groups.map(g =>
     `<div class="nav-sec">${g.sec}</div>` +
     g.items.map(it => `<div class="sitem${S.page===it.p?' active':''}" onclick="${it.p==='__settings'?'openSettingsScreen()':`nav('${it.p}')`}"><span class="sitem-icon">${it.icon}</span>${it.label}</div>`).join('')
   ).join('');
 
-  // Desktop horizontal tabs (top bar)
   tabs.innerHTML = ['dashboard','loans','create','schedule','payment','calculator','analyser'].map(p =>
     `<div class="ntab${S.page===p?' active':''}" onclick="nav('${p}')">${PAGES[p][0]}</div>`
   ).join('') + (isNativeBuild() ? `<div class="ntab" onclick="openSettingsScreen()">⚙ Settings</div>` : '');
 
-  // Mobile bottom nav — fixed 5 primary destinations, always visible, never hidden/cut off
   bnav.innerHTML = BOTTOM_NAV_PAGES.map(p =>
     `<button class="bnav-item${S.page===p?' active':''}" onclick="nav('${p}')">
        <span class="bnav-icon">${BOTTOM_NAV_ICONS[p]}</span>${PAGES[p][0]}
      </button>`
   ).join('') + `<button class="bnav-item" onclick="openDrawer()"><span class="bnav-icon">☰</span>More</button>`;
 
-  // Mobile drawer — every section (including ones not on the bottom bar) + Settings
   drawerItems.innerHTML = groups.map(g =>
     `<div class="nav-sec">${g.sec}</div>` +
     g.items.map(it => `<div class="sitem${S.page===it.p?' active':''}" onclick="${it.p==='__settings'?'openSettingsScreen();closeDrawer()':`nav('${it.p}');closeDrawer()`}"><span class="sitem-icon">${it.icon}</span>${it.label}</div>`).join('')
@@ -495,7 +482,7 @@ function pgLoans() {
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div class="ctitle" style="margin:0">All Loans</div>
-      <button class="btn btn-r btn-sm" onclick="delLoan('${l.loan_id}')">Delete</button>
+      <button class="btn btn-p btn-sm" onclick="nav('create')">＋ New</button>
     </div>
     ${S.loans.length===0
       ? `<div class="empty"><div class="empty-icon">⊘</div><div>No loans yet</div></div>`
@@ -509,7 +496,8 @@ function pgLoans() {
             <td>${badge(l.status)}</td>
             <td>
               <button class="btn btn-s btn-sm" onclick="goLoan('${l.loan_id}')">View</button>
-              <a href="/api/loans/${l.loan_id}/report" target="_blank" class="btn btn-s btn-sm">PDF</a>
+              <a href="${BASE}/api/loans/${l.loan_id}/report" target="_blank" class="btn btn-s btn-sm">PDF</a>
+              <button class="btn btn-r btn-sm" onclick="delLoan('${l.loan_id}')">Delete</button>
             </td>
           </tr>`).join('')}</tbody>
         </table></div>`}
@@ -583,7 +571,7 @@ async function doCreate() {
       loan_amount:amt,
       interest_rate:rate,
       tenure_months:ten,
-      sanction_date: sanction || start,   // ← falls back to start if blank
+      sanction_date: sanction || start,
       start_date:start
     });
     await loadLoans();
@@ -597,6 +585,42 @@ async function doCreate() {
   }
 }
 
+/* Schedule rows, with part payments shown as green rows at their payment date */
+function scheduleRowsHTML() {
+  const pps = (S.payments || [])
+    .filter(p => p.payment_type === 'Part Payment')
+    .sort((a, b) => String(a.payment_date).localeCompare(String(b.payment_date)));
+  let k = 0;
+  const out = [];
+
+  const ppRow = p => `<tr style="background:rgba(34,197,94,.10)">
+      <td style="color:var(--gr);font-weight:700">PP</td>
+      <td>${p.payment_date}</td>
+      <td style="color:var(--gr)">${fc(p.amount_paid)}</td>
+      <td>—</td>
+      <td style="color:var(--gr)">${fc(p.amount_paid)}</td>
+      <td>${fc(p.remaining_balance_after_payment)}</td>
+      <td><span class="badge bg">Part Payment</span></td>
+      <td style="color:var(--tx3)">${p.payment_date}</td>
+    </tr>`;
+
+  S.schedule.forEach(r => {
+    while (k < pps.length && String(pps[k].payment_date) < String(r.due_date)) out.push(ppRow(pps[k++]));
+    out.push(`<tr>
+      <td style="color:var(--tx3)">${r.emi_number}</td>
+      <td>${r.due_date}</td>
+      <td>${fc(r.emi_amount)}</td>
+      <td style="color:var(--rd)">${fc(r.interest_component)}</td>
+      <td style="color:var(--gr)">${fc(r.principal_component)}</td>
+      <td>${fc(r.outstanding_balance)}</td>
+      <td>${badge(r.status)}</td>
+      <td style="color:var(--tx3)">${r.paid_date || '—'}</td>
+    </tr>`);
+  });
+  while (k < pps.length) out.push(ppRow(pps[k++]));
+  return out.join('');
+}
+
 function pgSchedule() {
   const loan=S.loans.find(l=>l.loan_id===S.sel);
   const sm=S.summary;
@@ -604,9 +628,10 @@ function pgSchedule() {
   const tot=S.schedule.length;
   const pct=tot?Math.round(paid/tot*100):0;
   return `${alertHTML()}
-  <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+  <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
     ${loanSel(true)}
-    ${S.sel?`<a href="/api/loans/${S.sel}/report" target="_blank" class="btn btn-s btn-sm">↓ PDF Report</a>`:''}
+    ${S.sel?`<a href="${BASE}/api/loans/${S.sel}/report" target="_blank" class="btn btn-s btn-sm">↓ PDF Report</a>`:''}
+    ${S.sel?`<button class="btn btn-s btn-sm" onclick="recalcSchedule()">⟳ Recalculate</button>`:''}
   </div>
   ${loan?`
   <div class="g4" style="margin-bottom:14px">
@@ -634,16 +659,7 @@ function pgSchedule() {
     </div>
     <div class="twrap"><table>
       <thead><tr><th>#</th><th>Due Date</th><th>EMI</th><th>Interest</th><th>Principal</th><th>Balance</th><th>Status</th><th>Paid On</th></tr></thead>
-      <tbody>${S.schedule.map(r=>`<tr>
-        <td style="color:var(--tx3)">${r.emi_number}</td>
-        <td>${r.due_date}</td>
-        <td>${fc(r.emi_amount)}</td>
-        <td style="color:var(--rd)">${fc(r.interest_component)}</td>
-        <td style="color:var(--gr)">${fc(r.principal_component)}</td>
-        <td>${fc(r.outstanding_balance)}</td>
-        <td>${badge(r.status)}</td>
-        <td style="color:var(--tx3)">${r.paid_date||'—'}</td>
-      </tr>`).join('')}</tbody>
+      <tbody>${scheduleRowsHTML()}</tbody>
     </table></div>
   </div>`
   :'<div class="card"><div class="empty"><div class="empty-icon">≡</div><div>Select a loan to view its schedule</div></div></div>'}`;
@@ -664,7 +680,7 @@ function pgPayment() {
         Next due: <strong>EMI #${nextUnpaid.emi_number}</strong> — 
         Due ${nextUnpaid.due_date} — 
         Amount <strong>${fc(nextUnpaid.emi_amount)}</strong>
-        ${nextUnpaid.is_pre_emi ? ' (Pre-EMI Interest)' : ''}
+        ${parseInt(nextUnpaid.is_pre_emi||0) ? ' (Pre-EMI Interest)' : ''}
       </div>` : ''}
       <div class="fg"><label class="flabel">Payment Date</label><input class="finput" id="p-date" type="date" value="${today}"></div>
       <div class="fg"><label class="flabel">Amount Paid (₹)</label>
@@ -684,7 +700,7 @@ function pgPayment() {
           ${unpaid.length === 0 
             ? '<option value="">No outstanding EMIs</option>'
             : unpaid.map(r => `<option value="${r.emi_number}" ${r === nextUnpaid ? 'selected' : ''}>
-                EMI #${r.emi_number} — Due ${r.due_date} — ${fc(r.emi_amount)} ${r.status === 'Partial' ? '(Partial)' : ''}${r.is_pre_emi ? ' (Pre-EMI)' : ''}
+                EMI #${r.emi_number} — Due ${r.due_date} — ${fc(r.emi_amount)} ${r.status === 'Partial' ? '(Partial)' : ''}${parseInt(r.is_pre_emi||0) ? ' (Pre-EMI)' : ''}
               </option>`).join('')
           }
         </select>
@@ -763,6 +779,20 @@ async function delLoan(id) {
   } catch(e) { showAlert(e.message, 'error'); }
 }
 
+async function recalcSchedule() {
+  const id = S.sel; if (!id) return;
+  const n2 = v => Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+  try {
+    const pv = await api(`/api/loans/${id}/recalculate`, 'POST', {preview:true});
+    const lines = pv.part_payment_cycles.map(c =>
+      `EMI #${c.emi_number} (${c.due_date}): interest ₹${n2(c.old_interest)} → ₹${n2(c.new_interest)}`).join('\n') || 'No part payments found.';
+    if (!confirm(`${lines}\n\nPayoff: ${pv.old_last_due} → ${pv.new_last_due}\nTotal interest: ₹${n2(pv.old_total_interest)} → ₹${n2(pv.new_total_interest)}\n\nApply?`)) return;
+    const res = await api(`/api/loans/${id}/recalculate`, 'POST', {preview:false});
+    await loadLoans(); await loadLoanData(id);
+    showAlert(res.message, 'success'); render();
+  } catch(e) { showAlert(e.message, 'error'); }
+}
+
 function pgPartpay() {
   const today=new Date().toISOString().split('T')[0];
   const loan=S.loans.find(l=>l.loan_id===S.sel);
@@ -804,7 +834,6 @@ function pgPartpaySavings() {
     return `<div class="card" style="margin-top:16px">
       <div class="ctitle">Interest Saved from Part Payments</div>
       <div class="empty"><div>No part payments recorded yet for this loan.</div></div>
-      <button class="btn btn-r btn-sm" style="margin-top:8px" onclick="delPayment('${pp.payment_id}')">🗑 Delete this part payment</button>
     </div>`;
   }
 
@@ -812,9 +841,10 @@ function pgPartpaySavings() {
     <div class="met gr" style="margin-bottom:10px">
       <div class="mlabel">Part Payment of ${fc(pp.amount_paid)} on ${pp.payment_date}</div>
       <div class="mval" style="font-size:16px">${fc(pp.total_interest_saved)} saved overall</div>
-      <div style="font-size:12px;color:var(--muted,#888);margin-top:4px">
+      <div style="font-size:12px;color:var(--tx3);margin-top:4px">
         ≈ ${fc(pp.monthly_savings[0]?.interest_saved || 0)} saved in the first month after this payment, across ${pp.months_compared} months
       </div>
+      <button class="btn btn-r btn-sm" style="margin-top:8px" onclick="delPayment('${pp.payment_id}')">🗑 Delete this part payment</button>
     </div>
   `).join('');
 
@@ -1016,16 +1046,8 @@ function _anAddM(ds, n) {
 function anPrint() { window.print(); }
 
 function anAddLump() {
-
-  const unpaid =
-    (S.schedule || [])
-      .filter(r => r.status !== 'Paid');
-
-  AN.lumpSums.push({
-    amount: 0,
-    date: unpaid[0]?.due_date || ''
-  });
-
+  const unpaid = (S.schedule || []).filter(r => r.status !== 'Paid');
+  AN.lumpSums.push({ amount: 0, date: unpaid[0]?.due_date || '' });
   render();
   setTimeout(anRecalc, 50);
 }
@@ -1037,106 +1059,54 @@ function anDelLump(idx) {
 }
 
 function anUpdLump(idx, field, value) {
-  AN.lumpSums[idx][field] =
-    field === 'amount'
-      ? parseFloat(value || 0)
-      : value;
-
+  AN.lumpSums[idx][field] = field === 'amount' ? parseFloat(value || 0) : value;
   anRecalc();
-  console.log("Lump plans", AN.lumpSums);
 }
 
 /* Build scenario amortization schedule */
 function _anBuildScen(P, rate, emi, extra, extraFreq, unpaid) {
-
   const r = rate / 12 / 100;
-
   let balance = P;
   let month = 0;
   let cumInt = 0;
   const rows = [];
 
-  // Build lump sum lookup once
   const lumpMap = {};
-
   (AN.lumpSums || []).forEach(ls => {
-
     if (!ls.amount || !ls.date) return;
-
-    const idx = unpaid.findIndex(
-      x => x.due_date >= ls.date
-    );
-
-    if (idx >= 0) {
-      lumpMap[idx] =
-        (lumpMap[idx] || 0) + Number(ls.amount);
-    }
-
+    const idx = unpaid.findIndex(x => x.due_date >= ls.date);
+    if (idx >= 0) lumpMap[idx] = (lumpMap[idx] || 0) + Number(ls.amount);
   });
 
   while (balance > 1 && month < 600) {
-
-    // Apply lump sum before interest calculation
-    if (lumpMap[month]) {
-
-      balance = Math.max(
-        0,
-        balance - lumpMap[month]
-      );
-
-    }
+    if (lumpMap[month]) balance = Math.max(0, balance - lumpMap[month]);
 
     const interest = balance * r;
-
     let payment = emi;
-
-    if (
-      extra > 0 &&
-      extraFreq > 0 &&
-      month > 0 &&
-      month % extraFreq === 0
-    ) {
-      payment += extra;
-    }
+    if (extra > 0 && extraFreq > 0 && month > 0 && month % extraFreq === 0) payment += extra;
 
     let principal = payment - interest;
-
     if (principal <= 0) break;
-
-    if (principal > balance) {
-      principal = balance;
-      payment = principal + interest;
-    }
+    if (principal > balance) { principal = balance; payment = principal + interest; }
 
     balance -= principal;
     cumInt += interest;
 
-    const date =
-      month < unpaid.length
-        ? unpaid[month].due_date
-        : _anAddM(
-            unpaid[unpaid.length - 1].due_date,
-            month - unpaid.length + 1
-          );
+    const date = month < unpaid.length
+      ? unpaid[month].due_date
+      : _anAddM(unpaid[unpaid.length - 1].due_date, month - unpaid.length + 1);
 
     rows.push({
-      m: month,
-      date,
+      m: month, date,
       balance: Math.max(0, balance),
-      interest,
-      principal,
-      emi: payment,
-      cumInt,
+      interest, principal, emi: payment, cumInt,
       lumpApplied: lumpMap[month] || 0
     });
-
     month++;
   }
-
   return rows;
 }
 
-/* Simple simulate returning {months, totalInterest} */
 function _anSim(P, rate, emi) {
   const r = rate / 12 / 100;
   let bal = P, m = 0, ti = 0;
@@ -1148,33 +1118,26 @@ function _anSim(P, rate, emi) {
   return { months: m, totalInterest: ti };
 }
 
-/* Line chart common options */
 function _anLineOpts() {
   return {
     responsive: true, maintainAspectRatio: false,
     plugins: { legend: { labels: { color:'#8888a0', font:{size:9}, boxWidth:16 } } },
     scales: {
       x: {
-          grid: {
-              color:'rgba(255,255,255,.04)'
-          },
-          ticks: {
-              color:'#8888a0',
-              font:{size:9},
-              callback: function(value, index) {
-                  return index % 6 === 0
-                      ? this.getLabelForValue(value)
-                      : '';
-              }
+        grid: { color:'rgba(255,255,255,.04)' },
+        ticks: {
+          color:'#8888a0', font:{size:9},
+          callback: function(value, index) {
+            return index % 6 === 0 ? this.getLabelForValue(value) : '';
           }
+        }
       },
-      y: { beginAtZero: true,min: 0, grid:{color:'rgba(255,255,255,.04)'}, ticks:{color:'#8888a0',font:{size:9},
+      y: { beginAtZero: true, min: 0, grid:{color:'rgba(255,255,255,.04)'}, ticks:{color:'#8888a0',font:{size:9},
            callback: v => v>=100000 ? '₹'+(v/100000).toFixed(1)+'L' : '₹'+(v/1000).toFixed(0)+'k'} }
     }
   };
 }
 
-/* ── Page HTML ── */
 function pgAnalyser() {
   Object.keys(AN.charts).forEach(k => _anKill(k));
   const loan   = S.loans.find(l => l.loan_id === S.sel);
@@ -1190,7 +1153,6 @@ function pgAnalyser() {
   </div>
 
   <div class="g2" style="margin-bottom:14px">
-    <!-- Loan + status -->
     <div class="card">
       <div class="ctitle">Loan</div>
       ${loanSel(true)}
@@ -1204,80 +1166,29 @@ function pgAnalyser() {
       </div>`:''}
     </div>
 
-    <!-- Scenario inputs -->
     <div class="card">
       <div class="ctitle">Scenario Inputs</div>
-      <div style="display:grid;
-                  grid-template-columns:2fr 1fr;
-                  gap:12px">
-
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px">
         <div class="fg">
-          <label class="flabel">
-            Extra payment amount (₹)
-          </label>
-          <input
-            class="finput"
-            id="an-extra"
-            type="number"
-            value="0"
-            oninput="anRecalc()">
+          <label class="flabel">Extra payment amount (₹)</label>
+          <input class="finput" id="an-extra" type="number" value="0" oninput="anRecalc()">
         </div>
-
         <div class="fg">
-          <label class="flabel">
-            Every N months
-          </label>
-          <input
-            class="finput"
-            id="an-extra-freq"
-            type="number"
-            min="1"
-            value="1"
-            oninput="anRecalc()">
+          <label class="flabel">Every N months</label>
+          <input class="finput" id="an-extra-freq" type="number" min="1" value="1" oninput="anRecalc()">
         </div>
-
       </div>
       <div class="g2">
         <div class="fg">
           <label class="flabel">Future Lump Sum Plans</label>
-
           ${AN.lumpSums.map((r,i)=>`
-            <div style="
-              display:grid;
-              grid-template-columns:1fr 1fr 50px;
-              gap:10px;
-              margin-bottom:8px;
-            ">
-
-              <input
-                class="finput"
-                type="number"
-                placeholder="Amount"
-                value="${r.amount || ''}"
-                oninput="anUpdLump(${i},'amount',this.value)"
-              >
-
-              <input
-                class="finput"
-                type="date"
-                value="${r.date || firstDate}"
-                oninput="anUpdLump(${i},'date',this.value)"
-              >
-
-              <button
-                class="btn btn-r"
-                onclick="anDelLump(${i})">
-                ✕
-              </button>
-
+            <div style="display:grid;grid-template-columns:1fr 1fr 50px;gap:10px;margin-bottom:8px;">
+              <input class="finput" type="number" placeholder="Amount" value="${r.amount || ''}" oninput="anUpdLump(${i},'amount',this.value)">
+              <input class="finput" type="date" value="${r.date || firstDate}" oninput="anUpdLump(${i},'date',this.value)">
+              <button class="btn btn-r" onclick="anDelLump(${i})">✕</button>
             </div>
           `).join('')}
-
-          <button
-            class="btn"
-            onclick="anAddLump()">
-            + Add Lump Sum
-          </button>
+          <button class="btn" onclick="anAddLump()">+ Add Lump Sum</button>
         </div>
       </div>
       <div class="divider"></div>
@@ -1292,7 +1203,6 @@ function pgAnalyser() {
   ${!hasData
     ? `<div class="empty"><div class="empty-icon">◎</div><div>${loan&&loan.status==='Closed'?'Loan is closed.':'Select an active loan to begin analysis.'}</div></div>`
     : `
-  <!-- Summary metrics -->
   <div class="g4" style="margin-bottom:14px">
     <div class="met gr"><div class="mlabel">Months Saved</div><div class="mval" id="an-ms">—</div><div class="msub" id="an-ms2" style="color:var(--tx3)"></div></div>
     <div class="met gr"><div class="mlabel">Interest Saved</div><div class="mval" id="an-is" style="font-size:15px">—</div><div class="msub" id="an-is2" style="color:var(--tx3)"></div></div>
@@ -1300,7 +1210,6 @@ function pgAnalyser() {
     <div class="met ac"><div class="mlabel">Total Cost</div><div class="mval" id="an-tc" style="font-size:14px">—</div><div class="msub" id="an-tc2" style="color:var(--tx3)"></div></div>
   </div>
 
-  <!-- Balance + Interest charts -->
   <div class="g2" style="margin-bottom:14px">
     <div class="card">
       <div class="ctitle">Outstanding Balance — Original vs Scenario</div>
@@ -1312,13 +1221,11 @@ function pgAnalyser() {
     </div>
   </div>
 
-  <!-- Monthly interest saved chart -->
   <div class="card" style="margin-bottom:14px">
     <div class="ctitle">Interest Saved Every Month <span style="font-size:9px;font-weight:400;color:var(--tx3)">(compared to no lump sum)</span></div>
     <div style="height:200px;position:relative"><canvas id="an-c-savings"></canvas></div>
   </div>
 
-  <!-- Sensitivity chart -->
   <div class="card" style="margin-bottom:14px">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
       <div>
@@ -1329,17 +1236,15 @@ function pgAnalyser() {
     <div style="height:170px;position:relative"><canvas id="an-c-sens"></canvas></div>
   </div>
 
-  <!-- Schedule comparison table -->
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div class="ctitle" style="margin:0">Schedule Comparison <span style="font-size:9px;font-weight:400;color:var(--tx3)">(first 48 months)</span></div>
+      <div class="ctitle" style="margin:0">Schedule Comparison</div>
       <span id="an-tbl-note" style="font-size:9px;color:var(--gr)"></span>
     </div>
     <div class="twrap" id="an-tbl"></div>
   </div>`}`;
 }
 
-/* ── Main recalc ── */
 function anRecalc() {
   const loan   = S.loans.find(l => l.loan_id === S.sel);
   const sum    = S.summary;
@@ -1350,18 +1255,9 @@ function anRecalc() {
   const rate  = parseFloat(loan.interest_rate);
   const emi   = parseFloat(loan.emi_amount);
   const extra = parseFloat(document.getElementById('an-extra')?.value) || 0;
-  const extraFreq =
-    Math.max(
-      1,
-      parseInt(
-        document.getElementById('an-extra-freq').value || 1
-      )
-    );
-  const totalLump =
-    (AN.lumpSums || [])
-      .reduce((s,x)=>s + (parseFloat(x.amount)||0), 0);
+  const extraFreq = Math.max(1, parseInt(document.getElementById('an-extra-freq')?.value || 1));
+  const totalLump = (AN.lumpSums || []).reduce((s,x)=>s + (parseFloat(x.amount)||0), 0);
 
-  // Build original rows from S.schedule unpaid list
   let cumOrig = 0;
   const orig = unpaid.map((r, i) => ({
     m: i, date: r.due_date,
@@ -1371,15 +1267,9 @@ function anRecalc() {
     emi:       parseFloat(r.emi_amount),
     cumInt:    (cumOrig += parseFloat(r.interest_component), cumOrig),
   }));
-  console.log("anRecalc CALLED");
 
-  const hasScen = extra > 0 || totalLump  > 0;
-  const scen = hasScen ? _anBuildScen(P, rate, emi, extra,extraFreq, unpaid) : [];
-  console.log("extra =", extra);
-  console.log("totalLump =", totalLump);
-  console.log("lumpSums =", AN.lumpSums);   
-  console.log("hasScen =", hasScen);
-  console.log("scen rows =", scen.length);
+  const hasScen = extra > 0 || totalLump > 0;
+  const scen = hasScen ? _anBuildScen(P, rate, emi, extra, extraFreq, unpaid) : [];
 
   const origTotalInt = orig.length > 0 ? orig[orig.length-1].cumInt : 0;
   const scenTotalInt = scen.length > 0 ? scen[scen.length-1].cumInt : origTotalInt;
@@ -1389,7 +1279,6 @@ function anRecalc() {
   const scenPayoff   = scen.length > 0 ? scen[scen.length-1].date : origPayoff;
   const pct          = origTotalInt > 0 ? Math.round(intSaved / origTotalInt * 100) : 0;
 
-  // Update summary cards
   const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
   set('an-ms',  hasScen ? (monthsSaved > 0 ? monthsSaved : '0') : '—');
   set('an-ms2', hasScen && monthsSaved > 0 ? `${orig.length} → ${scen.length} months` : '');
@@ -1400,7 +1289,6 @@ function anRecalc() {
   set('an-tc',  hasScen ? fc(P + scenTotalInt) : fc(P + origTotalInt));
   set('an-tc2', hasScen ? `was ${fc(P + origTotalInt)}` : 'principal + interest');
 
-  // Target payoff input
   const tgt = parseInt(document.getElementById('an-target')?.value) || 0;
   const tgtEl = document.getElementById('an-tgt-out');
   if (tgtEl) {
@@ -1413,111 +1301,55 @@ function anRecalc() {
       tgtEl.innerHTML = `<span style="color:var(--am)">Target must be < current ${orig.length} months</span>`;
     } else { tgtEl.textContent = ''; }
   }
-  const lump =
-    (AN.lumpSums || []).reduce(
-      (s, x) => s + (parseFloat(x.amount) || 0),
-      0
-    );
+  const lump = (AN.lumpSums || []).reduce((s, x) => s + (parseFloat(x.amount) || 0), 0);
 
   let lumpIdx = -1;
-
   if (AN.lumpSums && AN.lumpSums.length > 0) {
-    const firstLump = AN.lumpSums.find(
-      x => x.amount > 0 && x.date
-    );
-
-    if (firstLump) {
-      lumpIdx = unpaid.findIndex(
-        r => r.due_date >= firstLump.date
-      );
-    }
+    const firstLump = AN.lumpSums.find(x => x.amount > 0 && x.date);
+    if (firstLump) lumpIdx = unpaid.findIndex(r => r.due_date >= firstLump.date);
   }
 
-  console.log("orig rows =", orig.length);
-  console.log("scen rows =", scen.length);
-  console.log("table element =", document.getElementById("an-tbl"));
-  // Draw charts
   _anDrawBal(orig, scen, hasScen);
   _anDrawInt(orig, scen, hasScen);
   _anDrawSavings(orig, scen, hasScen);
-  _anDrawSens(P, rate, emi, extra,lump, unpaid);
-  _anDrawTable(orig, scen, hasScen,lumpIdx,lump);
+  _anDrawSens(P, rate, emi, extra, lump, unpaid);
+  _anDrawTable(orig, scen, hasScen, lumpIdx, lump);
 }
 
 function _anDrawBal(orig, scen, hasScen) {
-
   const labels = orig.map(r => r.date.slice(0,7));
-
-  const datasets = [
-    {
-      label:'Original',
-      data: orig.map(r => r.balance),
-      borderColor:'#ef4444',
-      backgroundColor:'rgba(239,68,68,.08)',
-      borderWidth:2,
-      pointRadius:0,
-      fill:true,
-      tension:.3
-    }
-  ];
+  const datasets = [{
+    label:'Original', data: orig.map(r => r.balance),
+    borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.08)',
+    borderWidth:2, pointRadius:0, fill:true, tension:.3
+  }];
 
   if (hasScen && scen.length > 0) {
-
-    const scenData = labels.map((_, i) =>
-      i < scen.length ? scen[i].balance : 0
-    );
-
+    const scenData = labels.map((_, i) => i < scen.length ? scen[i].balance : 0);
     datasets.push({
-      label:'Scenario',
-      data: scenData,
-      borderColor:'#22c55e',
-      backgroundColor:'rgba(34,197,94,.08)',
-      borderWidth:3,
-      pointRadius:0,
-      fill:false,
-      tension:.3
+      label:'Scenario', data: scenData,
+      borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)',
+      borderWidth:3, pointRadius:0, fill:false, tension:.3
     });
 
     (AN.lumpSums || []).forEach(ls => {
-
       if (!ls.amount || !ls.date) return;
-
-      const idx = labels.findIndex(
-        d => d >= ls.date.slice(0,7)
-      );
-
+      const idx = labels.findIndex(d => d >= ls.date.slice(0,7));
       if (idx >= 0) {
-
         datasets.push({
           label: `₹${Math.round(ls.amount).toLocaleString()}`,
-          data: labels.map((_, i) =>
-            i === idx ? scenData[i] : null
-          ),
-          pointRadius: 7,
-          pointHoverRadius: 9,
-          pointBackgroundColor: '#6c63ff',
-          pointBorderColor: '#ffffff',
-          pointBorderWidth: 2,
-          showLine: false
+          data: labels.map((_, i) => i === idx ? scenData[i] : null),
+          pointRadius: 7, pointHoverRadius: 9,
+          pointBackgroundColor: '#6c63ff', pointBorderColor: '#ffffff',
+          pointBorderWidth: 2, showLine: false
         });
-
       }
-
     });
   }
-
-  _anMkChart(
-    'an-c-bal',
-    {
-      type:'line',
-      data:{labels,datasets},
-      options:_anLineOpts()
-    }
-  );
+  _anMkChart('an-c-bal', { type:'line', data:{labels,datasets}, options:_anLineOpts() });
 }
 
 function _anDrawInt(orig, scen, hasScen) {
-  //const show = orig.slice(0, 60);
   const show = orig;
   const labels = show.map(r => r.date.slice(0,7));
   const ds = [{
@@ -1526,7 +1358,6 @@ function _anDrawInt(orig, scen, hasScen) {
     borderWidth:2, pointRadius:0, fill:true, tension:.3,
   }];
   if (hasScen && scen.length > 0) {
-    //const scenShow = scen.slice(0, 60);
     const scenShow = scen;
     const padded = show.map((_,i) => i < scenShow.length ? scenShow[i].cumInt : scenShow[scenShow.length-1].cumInt);
     ds.push({
@@ -1539,23 +1370,18 @@ function _anDrawInt(orig, scen, hasScen) {
 }
 
 function _anDrawSens(P, rate, emi, extra, lump, unpaid) {
-    if (!Array.isArray(unpaid)) {
-      console.error("unpaid is invalid", unpaid);
-      return;
-    }
+  if (!Array.isArray(unpaid)) return;
   const noteEl = document.getElementById('an-sens-note');
   if (lump <= 0 || lump >= P) {
     if (noteEl) noteEl.textContent = 'Enter a lump sum amount above to see how payment timing affects months saved';
     _anMkChart('an-c-sens', null);
     return;
   }
-  const r = rate / 12 / 100;
   const origMonths = _anSim(P, rate, emi + extra).months;
   const maxShow = Math.min(unpaid.length, 60);
   const labels = [], data = [], colors = [];
 
   for (let i = 0; i < maxShow; i++) {
-    // Balance at start of month i (before paying EMI i)
     const balAtI = i === 0 ? P : parseFloat(unpaid[i-1].outstanding_balance);
     const newBal = Math.max(0, balAtI - lump);
     const remMonths = newBal <= 0.5 ? 0 : _anSim(newBal, rate, emi + extra).months;
@@ -1622,7 +1448,6 @@ function _anDrawTable(orig, scen, hasScen, lumpIdx, lump) {
   const noteEl = document.getElementById('an-tbl-note');
   if (!el) return;
   const rows = orig.slice(0, 200);
-  const scenLen = scen.length;
   if (noteEl) noteEl.textContent = hasScen && scen.length < orig.length
     ? `Scenario ends ${orig.length - scen.length} months earlier`  : '';
   el.innerHTML = `<table>
@@ -1689,9 +1514,8 @@ function _timeAgo(iso) {
 }
 
 let _syncPollActive = false;
-let _syncPollDeadline = 0;        // wall-clock ms; bounds how long we sit on a "pulling" status
-const SYNC_POLL_MAX_MS = 60000;   // a backend wedged in a no-timeout network call can report
-                                  // pulling:true forever — never wait (or spin the banner) longer
+let _syncPollDeadline = 0;
+const SYNC_POLL_MAX_MS = 60000;
 
 async function checkSyncStatus() {
   try {
@@ -1709,26 +1533,17 @@ async function checkSyncStatus() {
       return;
     }
     if (st.pulling) {
-      // Bound the wait. If the server's startup pull is wedged (e.g. a Sheets
-      // API call with no timeout), it reports pulling:true indefinitely — we
-      // must never let that hold the banner and this polling loop open forever.
-      // The loan data is already loaded straight from the server's DB, so once
-      // the cap is hit we stop waiting and invite a manual retry via ↓ Pull.
       if (!_syncPollDeadline) _syncPollDeadline = Date.now() + SYNC_POLL_MAX_MS;
       if (Date.now() < _syncPollDeadline) {
         dot.style.background = 'var(--am)';
         txt.textContent = 'Syncing…';
         ban.style.display = 'flex';
-        // Only schedule the next poll if one isn't already pending — prevents
-        // multiple overlapping polling loops from different call sites
-        // (startApp, the delayed re-check, etc.) hammering the server.
         if (!_syncPollActive) {
           _syncPollActive = true;
           setTimeout(() => { _syncPollActive = false; checkSyncStatus(); }, 2000);
         }
         return;
       }
-      // Cap exceeded — stop waiting on a sync that isn't completing.
       _syncPollActive = false;
       _syncPollDeadline = 0;
       ban.style.display = 'none';
@@ -1754,12 +1569,13 @@ async function checkSyncStatus() {
 
 async function syncPull() {
   const btn = document.getElementById('btn-pull');
-  _syncPollDeadline = 0;   // fresh manual attempt — re-open the bounded wait window
+  _syncPollDeadline = 0;
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span>';
   try {
     const res = await api('/api/sync/pull', 'POST');
     await loadLoans();
+    if (S.sel) { try { await loadLoanData(S.sel); } catch {} }
     render();
     showAlert(res.message, 'success');
   } catch(e) {
@@ -1792,7 +1608,6 @@ async function startApp() {
   checkSyncStatus();
   try { await loadLoans(); } catch(e) { showAlert('Could not load loans: '+e.message,'error'); }
   render();
-  // Re-check sync status after a short delay (startup pull may still be running)
   setTimeout(async () => {
     await checkSyncStatus();
     try { await loadLoans(); render(); } catch {}
@@ -1803,7 +1618,7 @@ function runInit() {
   if (isNativeBuild()) {
     const { serverUrl } = getSettings();
     BASE = serverUrl || BASE;
-    buildNav(); // refresh nav now that native status is confirmed (adds Settings)
+    buildNav();
     if (!serverUrl) { showSetupScreen(); return; }
   } else {
     console.log('[LoanLedger] Running as web — native features (Settings) hidden by design.');
@@ -1812,15 +1627,12 @@ function runInit() {
 }
 
 (function init() {
-  // Capacitor's bridge (window.Capacitor) can attach a beat after this
-  // script starts running. Listen for its ready event, but don't block
-  // forever — fall back to an immediate check after a short timeout so
-  // the app still opens promptly either way.
   let started = false;
   const go = () => { if (!started) { started = true; runInit(); } };
   document.addEventListener('capacitorReady', go);
   setTimeout(go, 150);
 })();
+
 function showSetupScreen(message) {
   const { serverUrl, passphrase } = getSettings();
   const el = document.createElement('div');
@@ -1856,10 +1668,6 @@ function showSetupScreen(message) {
     const statusEl = document.getElementById('setup-status');
     if (!url) { statusEl.textContent = 'Server URL is required.'; return; }
 
-    // Validate the URL is well-formed before saving it anywhere. This catches
-    // corrupted/double-pasted input (e.g. autocomplete merging old + new text)
-    // immediately, with a clear message, instead of silently saving garbage
-    // that fails later with a vague "could not connect" / "failed to fetch".
     let parsed;
     try {
       parsed = new URL(url);
@@ -1875,7 +1683,7 @@ function showSetupScreen(message) {
       statusEl.textContent = 'That doesn\'t look like a real server address. Check for typos.';
       return;
     }
-    const cleanUrl = parsed.origin; // normalized, strips any stray trailing path/garbage
+    const cleanUrl = parsed.origin;
 
     statusEl.textContent = 'Connecting…';
     saveSettings(cleanUrl, pass);
@@ -1896,8 +1704,6 @@ function showSetupScreen(message) {
 }
 
 function openSettingsScreen() { showSetupScreen(); }
-
-
 </script>
 </body>
 </html>
