@@ -84,8 +84,9 @@ def generate_schedule(
         emi_amount = calculate_emi(principal, annual_rate, tenure_months)
 
     balance = outstanding_balance if outstanding_balance is not None else principal
-    r = annual_rate / 12 / 100
     due_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    # Regular EMI interest uses actual elapsed calendar days / 365.
+    previous_due_date = due_date - relativedelta(months=1)
     rows = []
 
     # ── EMI #0: Pre-EMI stub interest ──
@@ -109,7 +110,12 @@ def generate_schedule(
     # ── Regular EMIs #1..n ──
     for i in range(tenure_months):
         emi_num = start_emi_number + i
-        interest = _r2(balance * r)
+        period_days = (due_date - previous_due_date).days
+        if period_days <= 0:
+            raise ValueError("EMI due dates must be in chronological order")
+        interest = _r2(
+            balance * (float(annual_rate) / 100.0) * period_days / 365.0
+        )
         if i == 0 and first_interest is not None:
             interest = _r2(first_interest)
         principal_comp = _r2(emi_amount - interest)
@@ -143,31 +149,73 @@ def generate_schedule(
 
     return rows
 
-def calculate_split_interest(opening_balance: float, annual_rate: float,
-                             prev_emi_date: str,
-                             part_payments: list[tuple[str, float]]) -> float:
+def _actual_days(start_date: date, end_date: date) -> int:
+    """Actual elapsed calendar days between two dates."""
+    return (end_date - start_date).days
+
+
+def calculate_split_interest(
+    opening_balance: float,
+    annual_rate: float,
+    prev_emi_date: str,
+    part_payments: list[tuple[str, float]],
+    cycle_end_date: str | None = None,
+) -> float:
     """
-    Interest for one EMI cycle, split at every part-payment date.
-    30-day month basis: each segment earns  balance * (rate/12) * days/30.
-    The cycle is always 30 days in total, so a 31-day month is not over-charged.
-    part_payments: [(payment_date 'YYYY-MM-DD', amount), ...] falling in this cycle.
+    Calculate one EMI cycle's split-period interest on an Actual/365 basis.
+
+    Interest for each segment:
+        balance * annual_rate / 100 * actual_days / 365
+
+    Each part payment reduces the balance from its payment date onward.
+    Dates are actual calendar dates, so 31-day months contribute 31 days,
+    February contributes 28/29 days, and leap years are handled naturally.
     """
-    r = annual_rate / 12 / 100
-    prev = datetime.strptime(prev_emi_date, "%Y-%m-%d").date()
+    prev = date.fromisoformat(str(prev_emi_date))
+    end = (
+        date.fromisoformat(str(cycle_end_date))
+        if cycle_end_date else prev + relativedelta(months=1)
+    )
+    total_days = _actual_days(prev, end)
+    if total_days <= 0:
+        raise ValueError("EMI cycle end date must be after previous EMI date")
 
     events = []
-    for d, amt in part_payments:
-        off = (datetime.strptime(str(d), "%Y-%m-%d").date() - prev).days
-        events.append((min(30, max(0, off)), float(amt)))
-    events.sort(key=lambda e: e[0])
+    for payment_date, amount in part_payments:
+        pay_dt = date.fromisoformat(str(payment_date))
+        amount = float(amount)
+        if amount <= 0:
+            raise ValueError("Part-payment amount must be greater than zero")
+        if not prev <= pay_dt < end:
+            raise ValueError(
+                f"Part-payment date {payment_date} is outside the EMI cycle "
+                f"({prev.isoformat()} to {end.isoformat()})"
+            )
+        events.append((pay_dt, amount))
 
-    bal, cursor, interest = float(opening_balance), 0, 0.0
-    for off, amt in events:
-        interest += bal * r * (off - cursor) / 30
-        bal -= amt
-        cursor = off
-    interest += bal * r * (30 - cursor) / 30
+    events.sort(key=lambda item: item[0])
+
+    balance = float(opening_balance)
+    if balance <= 0:
+        raise ValueError("Opening balance must be greater than zero")
+
+    annual_daily_rate = float(annual_rate) / 100.0 / 365.0
+    cursor = prev
+    interest = 0.0
+
+    for pay_dt, amount in events:
+        segment_days = (pay_dt - cursor).days
+        interest += balance * annual_daily_rate * segment_days
+        balance -= amount
+        if balance < -0.005:
+            raise ValueError("Part payments exceed the outstanding principal")
+        balance = max(0.0, balance)
+        cursor = pay_dt
+
+    interest += balance * annual_daily_rate * (end - cursor).days
     return _r2(interest)
+
+
 # ── Post-event recalculations ─────────────────────────────────────────
 
 def _nper(balance: float, r: float, emi: float) -> int:

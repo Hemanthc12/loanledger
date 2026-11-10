@@ -8,7 +8,6 @@ import uuid
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import emi_calculator as calc
-from dateutil.relativedelta import relativedelta
 
 TYPE_PART = "Part Payment"
 TYPE_RATE = "Rate Change"
@@ -59,8 +58,8 @@ class State:
 
 def resplit_schedule(loan, schedule, payments):
     """
-    Recompute interest for every EMI cycle that contains a part payment
-    (split at the payment date, 30-day basis). Paid rows keep their status and
+    Recompute interest for every EMI cycle using Actual/365, splitting at
+    each part-payment date. Paid rows keep their status and
     amounts; later balances and unpaid EMIs flow from the new figures.
     Payments are never modified. Returns (new_rows, report).
     """
@@ -68,7 +67,6 @@ def resplit_schedule(loan, schedule, payments):
         raise ValueError("This loan has rate-change entries; recalculating it in place isn't supported yet.")
 
     rate = float(loan["interest_rate"])
-    r = rate / 12 / 100
     emi_now = float(loan["emi_amount"])
     pps = [(str(p["payment_date"]), float(p["amount_paid"]))
            for p in payments if p["payment_type"] == TYPE_PART]
@@ -96,6 +94,8 @@ def resplit_schedule(loan, schedule, payments):
     bal = float(loan["loan_amount"])
     out, i = [], 0
     last_due = date.fromisoformat(old_last)
+    # First regular EMI cycle starts one scheduled month before its due date.
+    prev_due = date.fromisoformat(str(reg[0]["due_date"])) - relativedelta(months=1)
     next_no = int(reg[-1]["emi_number"]) + 1
     cycles = []
 
@@ -112,13 +112,22 @@ def resplit_schedule(loan, schedule, payments):
             next_no += 1
         i += 1
 
-        prev = due - relativedelta(months=1)
+        # Carry forward the actual previous scheduled EMI due date. This
+        # remains correct when the recalculated schedule extends past old rows.
+        prev = prev_due
         cyc = [(d, a) for d, a in pps if prev <= date.fromisoformat(d) < due]
         pp_sum = sum(a for _, a in cyc)
         if cyc:
-            interest = calc.calculate_split_interest(bal, rate, prev.isoformat(), cyc)
+            interest = calc.calculate_split_interest(
+                bal, rate, prev.isoformat(), cyc, cycle_end_date=due.isoformat()
+            )
         else:
-            interest = calc._r2(bal * r)
+            period_days = (due - prev).days
+            if period_days <= 0:
+                raise ValueError("EMI due dates must be in chronological order")
+            interest = calc._r2(
+                bal * (rate / 100.0) * period_days / 365.0
+            )
         bal_after = round(bal - pp_sum, 2)
 
         is_paid = row["status"] in ("Paid", "Partial")
@@ -140,6 +149,7 @@ def resplit_schedule(loan, schedule, payments):
                            "new_interest": interest})
         out.append(row)
         bal = row["outstanding_balance"]
+        prev_due = due
 
     new_rows = sorted(pre + out, key=lambda x: int(x["emi_number"]))
     report = {
@@ -272,17 +282,61 @@ def apply_part_payment(st, ev):
     rate = float(st.loan["interest_rate"])
     pay_date = str(ev["payment_date"])
 
+    
     # ── Split-period interest for this EMI cycle ──
+
     next_due = str(nxt["due_date"])
-    prev_due = (date.fromisoformat(next_due) - relativedelta(months=1)).isoformat()
-    # earlier part payments already applied inside this same cycle
-    same_cycle = [(str(p["payment_date"]), float(p["amount_paid"]))
-                  for p in st.payments
-                  if p["payment_type"] == TYPE_PART
-                  and prev_due < str(p["payment_date"]) < next_due]
-    opening = outstanding + sum(a for _, a in same_cycle)   # balance at the previous EMI date
+    next_date = date.fromisoformat(next_due)
+
+    # Find the actual previous EMI date from the schedule.
+    previous_rows = [
+        r for r in st.schedule
+        if int(r["emi_number"]) < cut
+    ]
+
+    if previous_rows:
+        previous_row = max(
+            previous_rows,
+            key=lambda r: str(r["due_date"])
+        )
+        prev_due = str(previous_row["due_date"])
+    else:
+        prev_due = (
+            next_date - relativedelta(months=1)
+        ).isoformat()
+
+    prev_date = date.fromisoformat(prev_due)
+    payment_date = date.fromisoformat(pay_date)
+
+    # Ensure the new part payment belongs to this EMI cycle.
+    if not prev_date <= payment_date < next_date:
+        raise ValueError(
+            f"Part payment date {pay_date} is outside the "
+            f"current EMI cycle ({prev_due} to {next_due})."
+        )
+
+    # Include every earlier part payment in this cycle.
+    same_cycle = [
+        (str(p["payment_date"]), float(p["amount_paid"]))
+        for p in st.payments
+        if p["payment_type"] == TYPE_PART
+        and prev_due <= str(p["payment_date"]) < next_due
+    ]
+
+    # Reconstruct original opening balance before all
+    # part payments in this cycle.
+    opening = outstanding + sum(
+        amount for _, amount in same_cycle
+    )
+
+    # Calculate interest across all payment segments.
     cycle_interest = calc.calculate_split_interest(
-        opening, rate, prev_due, same_cycle + [(pay_date, amount)])
+        opening,
+        rate,
+        prev_due,
+        same_cycle + [(pay_date, amount)],
+        cycle_end_date=next_due,
+    )
 
     new_emi, new_sched = calc.recalculate_after_part_payment(
         st.loan["loan_id"], new_balance, rate,
